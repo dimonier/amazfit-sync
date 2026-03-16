@@ -62,6 +62,7 @@ DEFAULT_ENDPOINTS = (
         params={"device_type": "android_phone"},
     ),
 )
+RUN_DETAIL_ENDPOINT = "/v1/sport/run/detail.json"
 
 
 class AmazfitApiError(RuntimeError):
@@ -392,6 +393,95 @@ class AmazfitApiClient:
             payload=payload,
         )
 
+    def fetch_run_detail_records(
+        self,
+        history_record: RawPayloadRecord,
+        *,
+        app_token: str,
+        limit: int | None = None,
+    ) -> list[RawPayloadRecord]:
+        """Fetch workout details for a successful run_history payload."""
+        if history_record.resource != "run_history":
+            return []
+
+        detail_candidates: list[tuple[str, str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in _extract_run_history_entries(history_record.payload):
+            trackid = item.get("trackid")
+            source = item.get("source") or history_record.params.get("source") or "run.mifit.huami.com"
+            if trackid is None or source is None:
+                continue
+
+            signature = (str(trackid), str(source))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            detail_candidates.append((signature[0], signature[1], item.get("end_time")))
+
+        if limit is not None:
+            detail_candidates = detail_candidates[:limit]
+
+        detail_records: list[RawPayloadRecord] = []
+        for trackid, source, end_time in detail_candidates:
+            try:
+                detail_records.append(
+                    self.fetch_run_detail_endpoint(
+                        host=history_record.host,
+                        app_token=app_token,
+                        trackid=trackid,
+                        source=source,
+                        summary_end_time=end_time,
+                    )
+                )
+            except AmazfitApiError:
+                continue
+        return detail_records
+
+    def fetch_run_detail_endpoint(
+        self,
+        *,
+        host: str,
+        app_token: str,
+        trackid: str,
+        source: str,
+        summary_end_time: Any = None,
+    ) -> RawPayloadRecord:
+        """Fetch detailed payload for a workout returned by run_history."""
+        url = f"{host.rstrip('/')}{RUN_DETAIL_ENDPOINT}"
+        params = {
+            "trackid": trackid,
+            "source": source,
+        }
+        try:
+            response = self.session.get(
+                url,
+                params=params,
+                headers={**self.ZEPP_API_HEADERS, "apptoken": app_token},
+                timeout=self.config.request_timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise AmazfitApiError(
+                f"Run detail request failed for trackid={trackid} on {host}: {exc}"
+            ) from exc
+
+        payload = _decode_json_response(response)
+        record_params = dict(params)
+        if summary_end_time is not None:
+            record_params["summary_end_time"] = summary_end_time
+            summary_date = _timestamp_to_date(summary_end_time)
+            if summary_date is not None:
+                record_params["summary_date"] = summary_date
+
+        return RawPayloadRecord(
+            resource="run_detail",
+            host=host,
+            endpoint=RUN_DETAIL_ENDPOINT,
+            params=record_params,
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+            http_status=response.status_code,
+            payload=payload,
+        )
+
     def fetch_bearer_endpoint(
         self,
         endpoint: str,
@@ -514,3 +604,27 @@ def _merge_api_hosts(
     for host in existing_hosts:
         add_host(host)
     return tuple(merged)
+
+
+def _extract_run_history_entries(payload: dict[str, Any] | list[Any]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+
+    summary = data.get("summary")
+    if not isinstance(summary, list):
+        return []
+
+    return [item for item in summary if isinstance(item, dict)]
+
+
+def _timestamp_to_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None

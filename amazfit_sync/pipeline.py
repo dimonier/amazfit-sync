@@ -9,6 +9,7 @@ from typing import Sequence
 
 from amazfit_sync.amazfit_api import AmazfitApiClient, AmazfitApiError
 from amazfit_sync.config import AppConfig, ConfigError, load_config
+from amazfit_sync.models import RawPayloadRecord
 from amazfit_sync.normalize import normalize_records
 from amazfit_sync.obsidian_export import export_bundle_to_obsidian
 from amazfit_sync.storage import JsonStorage, build_validation_report
@@ -88,6 +89,7 @@ def _fetch_and_store(
     persist_raw: bool = True,
 ) -> dict[str, object]:
     raw_records = []
+    detail_records = []
     probe_results = []
     exchange_status = "not_attempted"
     exchange_error = None
@@ -126,10 +128,19 @@ def _fetch_and_store(
             credentials=credentials,
         )
         if persist_raw:
-            for record, probe in zip(raw_records, [p for p in probe_results if p.ok], strict=False):
-                raw_path = storage.save_raw_payload(record)
-                record.raw_path = raw_path.as_posix()
-                probe.raw_path = raw_path.as_posix()
+            successful_probes = [probe for probe in probe_results if probe.ok]
+            for record, probe in zip(raw_records, successful_probes, strict=False):
+                _persist_raw_record(storage, record)
+                probe.raw_path = record.raw_path
+
+            history_record = next((record for record in raw_records if record.resource == "run_history"), None)
+            if history_record is not None:
+                detail_records = client.fetch_run_detail_records(
+                    history_record,
+                    app_token=credentials["app_token"],
+                )
+                for record in detail_records:
+                    _persist_raw_record(storage, record)
     finally:
         client.close()
 
@@ -143,10 +154,15 @@ def _fetch_and_store(
     validation_path = storage.save_validation_report(validation_report)
 
     return {
-        "raw_records": raw_records,
+        "raw_records": [*raw_records, *detail_records],
         "probe_results": probe_results,
         "validation_report_path": validation_path.as_posix(),
     }
+
+
+def _persist_raw_record(storage: JsonStorage, record: RawPayloadRecord) -> None:
+    raw_path = storage.save_raw_payload(record)
+    record.raw_path = raw_path.as_posix()
 
 
 def _apply_runtime_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:

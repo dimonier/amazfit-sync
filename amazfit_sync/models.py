@@ -38,6 +38,9 @@ class DayRecord:
     date: str
     daily_summary: dict[str, Any] = field(default_factory=dict)
     sleep: dict[str, Any] = field(default_factory=dict)
+    activity: dict[str, Any] = field(default_factory=dict)
+    recovery: dict[str, Any] = field(default_factory=dict)
+    trends: dict[str, Any] = field(default_factory=dict)
     heart_rate: list[dict[str, Any]] = field(default_factory=list)
     workouts: list[dict[str, Any]] = field(default_factory=list)
     body_metrics: list[dict[str, Any]] = field(default_factory=list)

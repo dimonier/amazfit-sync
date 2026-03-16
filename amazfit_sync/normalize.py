@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from typing import Any
 
@@ -28,6 +28,8 @@ def normalize_records(
         try:
             if record.resource in {"band_summary", "band_detail"}:
                 _merge_band_data(day_map, record)
+            elif record.resource == "run_detail":
+                _merge_run_detail(day_map, record)
             else:
                 handled = _merge_generic_resource(day_map, record)
                 if not handled:
@@ -55,6 +57,7 @@ def normalize_records(
         for key in sorted(day_map)
         if range_start <= date.fromisoformat(key) <= range_end
     ]
+    _populate_day_metrics(days)
     return NormalizedBundle(
         generated_at=datetime.now(timezone.utc).isoformat(),
         date_range={"from": from_date, "to": to_date},
@@ -118,6 +121,24 @@ def _merge_band_data(day_map: dict[str, DayRecord], record: RawPayloadRecord) ->
             )
 
 
+def _merge_run_detail(day_map: dict[str, DayRecord], record: RawPayloadRecord) -> None:
+    detail = _extract_run_detail_payload(record.payload)
+    if not detail:
+        return
+
+    day = (
+        record.params.get("summary_date")
+        or _date_from_value(record.params.get("summary_end_time"))
+        or _derive_item_date(detail)
+    )
+    if not day:
+        return
+
+    day_record = _ensure_day(day_map, day)
+    _append_source(day_record, record.raw_path)
+    day_record.extras.setdefault("run_details", []).append(detail)
+
+
 def _merge_generic_resource(
     day_map: dict[str, DayRecord],
     record: RawPayloadRecord,
@@ -176,11 +197,27 @@ def _extract_items(payload: Any) -> list[Any]:
     return []
 
 
+def _extract_run_detail_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    detail = dict(data)
+    summary_date = payload.get("summary_date")
+    if summary_date is not None:
+        detail.setdefault("summary_date", summary_date)
+    return detail
+
+
 def _derive_item_date(item: dict[str, Any]) -> str | None:
     for key in ("date", "day", "record_date", "recordDate", "summary_date", "date_time"):
         value = item.get(key)
-        if isinstance(value, str) and len(value) >= 10:
-            return value[:10]
+        parsed = _date_from_value(value)
+        if parsed:
+            return parsed
 
     for key in (
         "start_time",
@@ -190,22 +227,9 @@ def _derive_item_date(item: dict[str, Any]) -> str | None:
         "created_at",
         "updated_at",
     ):
-        value = item.get(key)
-        if isinstance(value, str):
-            if value.isdigit():
-                try:
-                    return datetime.fromtimestamp(int(value), tz=timezone.utc).date().isoformat()
-                except (OSError, OverflowError, ValueError):
-                    continue
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
-            except ValueError:
-                continue
-        if isinstance(value, (int, float)):
-            try:
-                return datetime.fromtimestamp(value, tz=timezone.utc).date().isoformat()
-            except (OSError, OverflowError, ValueError):
-                continue
+        parsed = _date_from_value(item.get(key))
+        if parsed:
+            return parsed
     return None
 
 
@@ -253,3 +277,213 @@ def _dedupe_payload_list(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(signature)
         unique_items.append(item)
     return unique_items
+
+
+def _populate_day_metrics(days: list[DayRecord]) -> None:
+    for day_record in days:
+        day_record.activity = _build_activity_metrics(
+            day_record.daily_summary,
+            day_record.extras.get("step_stages", []),
+        )
+        day_record.recovery = _build_recovery_metrics(day_record.sleep)
+
+    _populate_trends(days)
+
+
+def _build_activity_metrics(
+    daily_summary: dict[str, Any],
+    step_stages: Any,
+) -> dict[str, Any]:
+    steps_total = _coerce_float(daily_summary.get("steps_total"))
+    goal_steps = _coerce_float(daily_summary.get("goal_steps"))
+
+    goal_completion_pct = None
+    if goal_steps and goal_steps > 0 and steps_total is not None:
+        goal_completion_pct = round((steps_total / goal_steps) * 100, 1)
+
+    stages = _normalize_step_stages(step_stages)
+    active_stage_minutes = sum(stage["duration_minutes"] for stage in stages) or None
+    longest_activity_bout_minutes = max(
+        (stage["duration_minutes"] for stage in stages),
+        default=None,
+    )
+    peak_steps_per_minute = max((stage["steps_per_minute"] for stage in stages), default=None)
+    if peak_steps_per_minute is not None:
+        peak_steps_per_minute = round(peak_steps_per_minute, 1)
+
+    return {
+        "goal_completion_pct": goal_completion_pct,
+        "activity_bout_count": len(stages),
+        "active_stage_minutes": active_stage_minutes,
+        "longest_activity_bout_minutes": longest_activity_bout_minutes,
+        "peak_steps_per_minute": peak_steps_per_minute,
+        "peak_activity_hour": _build_peak_activity_hour(stages),
+    }
+
+
+def _build_recovery_metrics(sleep: dict[str, Any]) -> dict[str, Any]:
+    deep_sleep_minutes = _coerce_int(sleep.get("deep_sleep_minutes"))
+    light_sleep_minutes = _coerce_int(sleep.get("light_sleep_minutes"))
+    sleep_minutes = None
+    if deep_sleep_minutes is not None or light_sleep_minutes is not None:
+        sleep_minutes = int(deep_sleep_minutes or 0) + int(light_sleep_minutes or 0)
+
+    sleep_start_epoch = _coerce_int(sleep.get("sleep_start_epoch"))
+    sleep_end_epoch = _coerce_int(sleep.get("sleep_end_epoch"))
+    time_in_bed_minutes = None
+    if (
+        sleep_start_epoch is not None
+        and sleep_end_epoch is not None
+        and sleep_end_epoch >= sleep_start_epoch
+    ):
+        time_in_bed_minutes = int((sleep_end_epoch - sleep_start_epoch) / 60)
+
+    return {
+        "sleep_minutes": sleep_minutes,
+        "time_in_bed_minutes": time_in_bed_minutes,
+        "resting_heart_rate": _coerce_int(sleep.get("resting_heart_rate")),
+    }
+
+
+def _populate_trends(days: list[DayRecord]) -> None:
+    dated_days = [(date.fromisoformat(day_record.date), day_record) for day_record in days]
+
+    for idx, (current_date, day_record) in enumerate(dated_days):
+        window_start = current_date - timedelta(days=14)
+        prior_days = [
+            previous
+            for previous_date, previous in dated_days[:idx]
+            if previous_date >= window_start
+        ]
+
+        steps_avg = _average(
+            _coerce_float(previous.daily_summary.get("steps_total")) for previous in prior_days
+        )
+        sleep_avg = _average(
+            _coerce_float(previous.recovery.get("sleep_minutes")) for previous in prior_days
+        )
+        resting_hr_avg = _average(
+            _coerce_float(previous.recovery.get("resting_heart_rate")) for previous in prior_days
+        )
+        goal_hit_rate = _goal_hit_rate(prior_days)
+
+        current_rhr = _coerce_float(day_record.recovery.get("resting_heart_rate"))
+        resting_hr_delta = None
+        if current_rhr is not None and resting_hr_avg is not None:
+            resting_hr_delta = round(current_rhr - resting_hr_avg, 1)
+
+        day_record.trends = {
+            "window_days_14d": len(prior_days),
+            "steps_rolling_avg_14d": steps_avg,
+            "sleep_minutes_rolling_avg_14d": sleep_avg,
+            "resting_hr_rolling_avg_14d": resting_hr_avg,
+            "goal_hit_rate_14d": goal_hit_rate,
+            "resting_hr_delta_14d": resting_hr_delta,
+        }
+
+
+def _normalize_step_stages(step_stages: Any) -> list[dict[str, float | int]]:
+    if not isinstance(step_stages, list):
+        return []
+
+    normalized: list[dict[str, float | int]] = []
+    for stage in step_stages:
+        if not isinstance(stage, dict):
+            continue
+
+        start = _coerce_int(stage.get("start"))
+        stop = _coerce_int(stage.get("stop"))
+        steps = _coerce_int(stage.get("step"))
+        if start is None or stop is None or steps is None:
+            continue
+
+        stage_start = max(0, min(start, 1439))
+        stage_stop = max(stage_start + 1, min(stop, 1440))
+        duration = max(stage_stop - stage_start, 1)
+        normalized.append(
+            {
+                "start": stage_start,
+                "stop": stage_stop,
+                "steps": steps,
+                "duration_minutes": duration,
+                "steps_per_minute": steps / duration,
+            }
+        )
+    return normalized
+
+
+def _build_peak_activity_hour(stages: list[dict[str, float | int]]) -> str | None:
+    if not stages:
+        return None
+
+    hourly_totals = [0.0] * 24
+    for stage in stages:
+        start = int(stage["start"])
+        stop = int(stage["stop"])
+        steps_per_minute = float(stage["steps_per_minute"])
+        for minute in range(start, stop):
+            hourly_totals[minute // 60] += steps_per_minute
+
+    peak_hour = max(range(24), key=lambda hour: hourly_totals[hour], default=None)
+    if peak_hour is None or hourly_totals[peak_hour] <= 0:
+        return None
+    return f"{peak_hour:02d}:00"
+
+
+def _goal_hit_rate(days: list[DayRecord]) -> float | None:
+    values = [
+        activity_value
+        for day_record in days
+        if (activity_value := _coerce_float(day_record.activity.get("goal_completion_pct"))) is not None
+    ]
+    if not values:
+        return None
+    hits = sum(1 for value in values if value >= 100.0)
+    return round((hits / len(values)) * 100, 1)
+
+
+def _average(values: Any) -> float | None:
+    numeric_values = [float(value) for value in values if value is not None]
+    if not numeric_values:
+        return None
+    return round(sum(numeric_values) / len(numeric_values), 1)
+
+
+def _date_from_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        if len(value) >= 10 and value[4:5] == "-" and value[7:8] == "-":
+            return value[:10]
+        if value.isdigit():
+            try:
+                return datetime.fromtimestamp(int(value), tz=timezone.utc).date().isoformat()
+            except (OSError, OverflowError, ValueError):
+                return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+        except ValueError:
+            return None
+
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).date().isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
