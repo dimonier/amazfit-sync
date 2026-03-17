@@ -45,7 +45,10 @@ def _render_day_markdown(day: dict[str, Any]) -> str:
     extras = day.get("extras", {})
     timezone_offset = _coerce_int(daily_summary.get("timezone_offset_minutes")) or 0
     sleep_window = _build_sleep_window(sleep, timezone_offset)
-    hourly_steps = _build_hourly_steps(extras.get("step_stages", []))
+    hourly_steps = _build_hourly_steps(
+        extras.get("step_stage_summary", []),
+        extras.get("step_stages", []),
+    )
 
     frontmatter = _build_frontmatter(day, daily_summary, activity, recovery)
     lines = frontmatter + [
@@ -499,7 +502,37 @@ def _average(values: Any) -> float | None:
     return round(sum(numeric_values) / len(numeric_values), 1)
 
 
-def _build_hourly_steps(step_stages: Any) -> dict[int, int]:
+def _build_hourly_steps(step_stage_summary: Any, step_stages: Any) -> dict[int, int]:
+    hourly_from_summary = _build_hourly_steps_from_summary(step_stage_summary)
+    if hourly_from_summary:
+        return hourly_from_summary
+    return _build_hourly_steps_from_stages(step_stages)
+
+
+def _build_hourly_steps_from_summary(step_stage_summary: Any) -> dict[int, int]:
+    if not isinstance(step_stage_summary, list):
+        return {}
+
+    hourly_totals: dict[int, int] = {}
+    for bucket in step_stage_summary:
+        if not isinstance(bucket, dict):
+            continue
+
+        time_bucket = _coerce_int(bucket.get("time"))
+        steps = _coerce_int(bucket.get("step"))
+        if time_bucket is None or steps is None:
+            continue
+
+        if not 0 <= time_bucket < 24 * 6:
+            continue
+
+        hour = time_bucket // 6
+        hourly_totals[hour] = hourly_totals.get(hour, 0) + steps
+
+    return {hour: total for hour, total in sorted(hourly_totals.items()) if total > 0}
+
+
+def _build_hourly_steps_from_stages(step_stages: Any) -> dict[int, int]:
     if not isinstance(step_stages, list):
         return {}
 

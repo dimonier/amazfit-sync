@@ -106,6 +106,10 @@ def _merge_band_data(day_map: dict[str, DayRecord], record: RawPayloadRecord) ->
             )
             if "stage" in stp:
                 day_record.extras.setdefault("step_stages", stp.get("stage") or [])
+            if "stepStageSummary" in stp:
+                day_record.extras.setdefault("step_stage_summary", []).extend(
+                    stp.get("stepStageSummary") or []
+                )
 
         slp = summary_payload.get("slp") or {}
         if isinstance(slp, dict):

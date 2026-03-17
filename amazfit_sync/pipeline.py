@@ -15,6 +15,10 @@ from amazfit_sync.obsidian_export import export_bundle_to_obsidian
 from amazfit_sync.storage import JsonStorage, build_validation_report
 
 
+def _log(message: str) -> None:
+    print(message, flush=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -38,15 +42,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "probe":
             return _run_probe(config, storage)
     except (ConfigError, AmazfitApiError, FileNotFoundError) as exc:
-        print(f"ERROR: {exc}")
+        _log(f"ERROR: {exc}")
         return 1
 
-    print("ERROR: Unknown command.")
+    _log("ERROR: Unknown command.")
     return 1
 
 
 def _run_sync(config: AppConfig, storage: JsonStorage) -> int:
+    _log(
+        "Starting sync "
+        f"for {config.default_from_date.isoformat()}..{config.default_to_date.isoformat()}"
+    )
     result = _fetch_and_store(config, storage)
+    _log("Normalizing fetched records into a day-centric bundle")
     bundle = normalize_records(
         result["raw_records"],
         from_date=config.default_from_date.isoformat(),
@@ -54,31 +63,43 @@ def _run_sync(config: AppConfig, storage: JsonStorage) -> int:
         validation_report_path=result["validation_report_path"],
     )
     bundle_path = storage.save_normalized_bundle(bundle)
-    print(f"Saved validation report to {result['validation_report_path']}")
-    print(f"Saved {len(result['raw_records'])} raw payload(s)")
-    print(f"Saved normalized bundle to {bundle_path}")
+    successful = [item for item in result["probe_results"] if item.ok]
+    _log(f"Saved validation report to {result['validation_report_path']}")
+    _log(f"Successful endpoint fetches: {len(successful)} / {len(result['probe_results'])}")
+    _log(f"Saved {len(result['raw_records'])} raw payload(s)")
+    _log(f"Saved normalized bundle to {bundle_path}")
     return 0
 
 
 def _run_dump_raw(config: AppConfig, storage: JsonStorage) -> int:
+    _log(
+        "Starting raw dump "
+        f"for {config.default_from_date.isoformat()}..{config.default_to_date.isoformat()}"
+    )
     result = _fetch_and_store(config, storage)
-    print(f"Saved validation report to {result['validation_report_path']}")
-    print(f"Saved {len(result['raw_records'])} raw payload(s)")
+    successful = [item for item in result["probe_results"] if item.ok]
+    _log(f"Saved validation report to {result['validation_report_path']}")
+    _log(f"Successful endpoint fetches: {len(successful)} / {len(result['probe_results'])}")
+    _log(f"Saved {len(result['raw_records'])} raw payload(s)")
     return 0
 
 
 def _run_probe(config: AppConfig, storage: JsonStorage) -> int:
+    _log(
+        "Starting probe "
+        f"for {config.default_from_date.isoformat()}..{config.default_to_date.isoformat()}"
+    )
     result = _fetch_and_store(config, storage, persist_raw=False)
-    print(f"Saved validation report to {result['validation_report_path']}")
+    _log(f"Saved validation report to {result['validation_report_path']}")
     successful = [item for item in result["probe_results"] if item.ok]
-    print(f"Successful endpoint probes: {len(successful)} / {len(result['probe_results'])}")
+    _log(f"Successful endpoint probes: {len(successful)} / {len(result['probe_results'])}")
     return 0
 
 
 def _run_export(config: AppConfig, storage: JsonStorage, bundle_path: str | None) -> int:
     bundle = storage.load_normalized_bundle(Path(bundle_path) if bundle_path else None)
     written_paths = export_bundle_to_obsidian(bundle, config.obsidian_export_dir)
-    print(f"Exported {len(written_paths)} markdown file(s) to {config.obsidian_export_dir}")
+    _log(f"Exported {len(written_paths)} markdown file(s) to {config.obsidian_export_dir}")
     return 0
 
 
@@ -97,16 +118,19 @@ def _fetch_and_store(
     client = AmazfitApiClient(config)
     try:
         with suppress(AmazfitApiError):
+            _log("Checking whether the access token can be refreshed")
             refreshed = client.try_refresh_access_token()
             if refreshed:
-                print(
+                _log(
                     "Refreshed access token successfully. "
                     "Update your .env if you want to persist the new token values."
                 )
 
         try:
+            _log("Resolving app credentials")
             credentials = client.resolve_app_credentials()
             exchange_status = f"ok:{credentials['credential_source']}"
+            _log(f"Resolved app credentials using {credentials['credential_source']}")
         except AmazfitApiError as exc:
             exchange_status = "failed"
             exchange_error = str(exc)
@@ -122,23 +146,32 @@ def _fetch_and_store(
                 f"{exchange_error} Validation report saved to {validation_path.as_posix()}"
             ) from exc
 
+        _log("Fetching endpoint payloads")
         probe_results, raw_records = client.probe_and_fetch(
             from_date=config.default_from_date,
             to_date=config.default_to_date,
             credentials=credentials,
+            progress=_log,
         )
+        successful_probes = [probe for probe in probe_results if probe.ok]
+        _log(f"Completed endpoint fetches: {len(successful_probes)} / {len(probe_results)} successful")
         if persist_raw:
-            successful_probes = [probe for probe in probe_results if probe.ok]
+            _log(f"Persisting {len(raw_records)} raw payload(s)")
             for record, probe in zip(raw_records, successful_probes, strict=False):
                 _persist_raw_record(storage, record)
                 probe.raw_path = record.raw_path
 
             history_record = next((record for record in raw_records if record.resource == "run_history"), None)
             if history_record is not None:
+                _log("Fetching run detail payloads linked from run_history")
                 detail_records = client.fetch_run_detail_records(
                     history_record,
                     app_token=credentials["app_token"],
+                    progress=_log,
                 )
+                _log(f"Fetched {len(detail_records)} run detail payload(s)")
+                if detail_records:
+                    _log(f"Persisting {len(detail_records)} run detail payload(s)")
                 for record in detail_records:
                     _persist_raw_record(storage, record)
     finally:
@@ -152,6 +185,7 @@ def _fetch_and_store(
         exchange_error=exchange_error,
     )
     validation_path = storage.save_validation_report(validation_report)
+    _log(f"Validation report written to {validation_path.as_posix()}")
 
     return {
         "raw_records": [*raw_records, *detail_records],

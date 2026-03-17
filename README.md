@@ -85,48 +85,57 @@ If the default reverse-engineered endpoint catalog is wrong for your account/dev
 
 ## Install
 
+Requires:
+
+- Python 3.12+
+- `uv`
+
+Install the project environment with:
+
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
+uv sync
 ```
+
+Run the CLI through `uv run main.py ...`.
+
+Although `pyproject.toml` defines a project script named `amazfit-sync`, `uv sync` currently skips installing entry points because this project is not packaged yet. That means `uv run amazfit-sync ...` does not work in the current repo state.
 
 ## CLI usage
 
 Show help:
 
 ```bash
-python main.py --help
+uv run main.py --help
 ```
 
 Probe endpoints first:
 
 ```bash
-python main.py probe
+uv run main.py probe
 ```
 
 Fetch data and write raw plus normalized JSON:
 
 ```bash
-python main.py sync --from 2026-03-01 --to 2026-03-15
+uv run main.py --from 2026-03-01 --to 2026-03-15 sync
 ```
 
 Fetch only raw payloads:
 
 ```bash
-python main.py dump-raw
+uv run main.py dump-raw
 ```
 
 Export latest normalized bundle to Obsidian Markdown:
 
 ```bash
-python main.py export-obsidian
+uv run main.py export-obsidian
 ```
 
 Export from a specific normalized bundle:
 
 ```bash
-python main.py export-obsidian --bundle data/normalized/latest.json
+uv run main.py export-obsidian --bundle data/normalized/latest.json
 ```
 
 ## Output layout
@@ -205,12 +214,13 @@ This is intentionally simple. The raw/normalized JSON is the source of truth. Ma
 ## Practical workflow
 
 1. Fill `.env`.
-2. Run `python main.py probe`.
-3. Inspect `data/reports/latest_validation.json`.
-4. If at least one endpoint works, run `python main.py sync`.
-5. Inspect `data/normalized/latest.json`.
-6. Run `python main.py export-obsidian`.
-7. Point Obsidian to `exports/obsidian` or copy the generated notes into your vault structure.
+2. Run `uv sync`.
+3. Run `uv run main.py probe`.
+4. Inspect `data/reports/latest_validation.json`.
+5. If at least one endpoint works, run `uv run main.py sync`.
+6. Inspect `data/normalized/latest.json`.
+7. Run `uv run main.py export-obsidian`.
+8. Point Obsidian to `exports/obsidian` or copy the generated notes into your vault structure.
 
 ## Security notes
 

@@ -5,7 +5,7 @@ import uuid
 from base64 import b64decode
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -277,14 +277,25 @@ class AmazfitApiClient:
         to_date: date,
         candidates: tuple[EndpointCandidate, ...] | None = None,
         credentials: dict[str, str] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> tuple[list[EndpointProbeResult], list[RawPayloadRecord]]:
         probe_results: list[EndpointProbeResult] = []
         raw_records: list[RawPayloadRecord] = []
         app_candidates = candidates or build_endpoint_candidates(self.config.extra_app_endpoints)
 
         credentials = credentials or self.resolve_app_credentials()
+        total_app_requests = len(self.config.api_hosts) * len(app_candidates)
+        app_request_index = 0
         for host in self.config.api_hosts:
+            if progress is not None:
+                progress(f"Probing app-token endpoints on host {host}")
             for candidate in app_candidates:
+                app_request_index += 1
+                if progress is not None:
+                    progress(
+                        f"[{app_request_index}/{total_app_requests}] "
+                        f"Fetching {candidate.resource} from {host}{candidate.endpoint}"
+                    )
                 try:
                     record = self.fetch_data_endpoint(
                         host=host,
@@ -318,7 +329,13 @@ class AmazfitApiClient:
                     )
                 )
 
-        for endpoint in self.config.bearer_probe_endpoints:
+        total_bearer_requests = len(self.config.bearer_probe_endpoints)
+        for bearer_index, endpoint in enumerate(self.config.bearer_probe_endpoints, start=1):
+            if progress is not None:
+                progress(
+                    f"[bearer {bearer_index}/{total_bearer_requests}] "
+                    f"Fetching /{endpoint.lstrip('/')}"
+                )
             try:
                 record = self.fetch_bearer_endpoint(endpoint)
             except AmazfitApiError as exc:
@@ -399,6 +416,7 @@ class AmazfitApiClient:
         *,
         app_token: str,
         limit: int | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> list[RawPayloadRecord]:
         """Fetch workout details for a successful run_history payload."""
         if history_record.resource != "run_history":
@@ -422,7 +440,13 @@ class AmazfitApiClient:
             detail_candidates = detail_candidates[:limit]
 
         detail_records: list[RawPayloadRecord] = []
-        for trackid, source, end_time in detail_candidates:
+        total_details = len(detail_candidates)
+        for detail_index, (trackid, source, end_time) in enumerate(detail_candidates, start=1):
+            if progress is not None:
+                progress(
+                    f"[run detail {detail_index}/{total_details}] "
+                    f"Fetching trackid={trackid} from {history_record.host}"
+                )
             try:
                 detail_records.append(
                     self.fetch_run_detail_endpoint(
