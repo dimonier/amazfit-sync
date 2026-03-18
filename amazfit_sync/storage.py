@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,38 +47,45 @@ class JsonStorage:
     def save_normalized_bundle(
         self,
         bundle: NormalizedBundle,
-        latest_name: str = "latest.json",
-    ) -> Path:
-        timestamp = _timestamp_slug(bundle.generated_at)
-        snapshot = self.normalized_dir / f"bundle_{timestamp}.json"
-        payload = self._merge_normalized_payloads(
-            [
-                *self._load_normalized_payloads(),
-                bundle.to_dict(),
-            ]
-        )
-        self._write_json(snapshot, payload)
-        latest = self.normalized_dir / latest_name
-        self._write_json(latest, payload)
-        return snapshot
+    ) -> list[Path]:
+        payload = bundle.to_dict()
+        period_payloads = self._split_normalized_payloads_by_month(payload)
+        written_paths: list[Path] = []
+        for period_key, period_payload in sorted(period_payloads.items()):
+            target = self._month_bundle_path(period_key)
+            self._write_json(target, period_payload)
+            written_paths.append(target)
+        return written_paths
 
     def load_normalized_bundle(self, path: Path | None = None) -> dict[str, Any]:
         if path is not None:
             return json.loads(path.read_text(encoding="utf-8"))
 
-        payloads = self._load_normalized_payloads()
+        payloads = self._load_period_payloads()
+        if not payloads:
+            payloads = self._load_legacy_normalized_payloads()
         if not payloads:
             raise FileNotFoundError(f"Normalized bundle not found in {self.normalized_dir.as_posix()}")
-
-        merged_payload = self._merge_normalized_payloads(payloads)
-        latest_path = self.normalized_dir / "latest.json"
-        current_latest = payloads[-1] if latest_path.exists() else None
-        if current_latest != merged_payload:
-            self._write_json(latest_path, merged_payload)
-        return merged_payload
+        return self._merge_normalized_payloads(payloads)
 
     def latest_normalized_path(self) -> Path:
-        return self.normalized_dir / "latest.json"
+        period_paths = self._period_bundle_paths()
+        if not period_paths:
+            raise FileNotFoundError(f"Normalized bundles not found in {self.normalized_dir.as_posix()}")
+        return period_paths[-1]
+
+    def load_raw_payloads(self) -> list[RawPayloadRecord]:
+        records: list[RawPayloadRecord] = []
+        if not self.raw_dir.exists():
+            return records
+
+        for path in sorted(self.raw_dir.glob("**/*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                continue
+            payload["raw_path"] = payload.get("raw_path") or self._display_path(path)
+            records.append(RawPayloadRecord(**payload))
+        return records
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,18 +94,41 @@ class JsonStorage:
             encoding="utf-8",
         )
 
-    def _load_normalized_payloads(self) -> list[dict[str, Any]]:
+    def _load_period_payloads(self) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for candidate in self._period_bundle_paths():
+            payloads.append(json.loads(candidate.read_text(encoding="utf-8")))
+        return payloads
+
+    def _load_legacy_normalized_payloads(self) -> list[dict[str, Any]]:
         payloads: list[dict[str, Any]] = []
         if not self.normalized_dir.exists():
             return payloads
 
+        legacy_paths = sorted(self.normalized_dir.glob("bundle_*.json"))
         latest_path = self.normalized_dir / "latest.json"
-        snapshot_paths = sorted(self.normalized_dir.glob("bundle_*.json"))
-        for candidate in [*snapshot_paths, latest_path]:
+        for candidate in [*legacy_paths, latest_path]:
             if not candidate.exists():
                 continue
             payloads.append(json.loads(candidate.read_text(encoding="utf-8")))
         return payloads
+
+    def _period_bundle_paths(self) -> list[Path]:
+        if not self.normalized_dir.exists():
+            return []
+        return sorted(path for path in self.normalized_dir.glob("*/*.json") if path.is_file())
+
+    def _month_bundle_path(self, period_key: str) -> Path:
+        year = period_key[:4]
+        return self.normalized_dir / year / f"{period_key}.json"
+
+    def _display_path(self, path: Path) -> str:
+        for base in (self.root_dir.parent, self.root_dir):
+            try:
+                return path.relative_to(base).as_posix()
+            except ValueError:
+                continue
+        return path.as_posix()
 
     def _merge_normalized_payloads(self, payloads: list[dict[str, Any]]) -> dict[str, Any]:
         merged_days: dict[str, dict[str, Any]] = {}
@@ -161,6 +192,47 @@ class JsonStorage:
             "validation_report_path": validation_report_path,
             "unknown_resources": unknown_resources,
         }
+
+    def _split_normalized_payloads_by_month(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        days_by_period: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for day in payload.get("days", []):
+            if not isinstance(day, dict):
+                continue
+            day_date = day.get("date")
+            if not isinstance(day_date, str) or len(day_date) < 7:
+                continue
+            days_by_period[day_date[:7]].append(day)
+
+        period_payloads: dict[str, dict[str, Any]] = {}
+        for period_key, days in days_by_period.items():
+            ordered_days = sorted(
+                (day for day in days if isinstance(day.get("date"), str)),
+                key=lambda day: day["date"],
+            )
+            if not ordered_days:
+                continue
+
+            period_payloads[period_key] = {
+                "generated_at": payload.get("generated_at") or _utc_now(),
+                "period": {"unit": "month", "value": period_key},
+                "date_range": {
+                    "from": ordered_days[0]["date"],
+                    "to": ordered_days[-1]["date"],
+                },
+                "resources": sorted(
+                    resource for resource in payload.get("resources", []) if isinstance(resource, str)
+                ),
+                "days": ordered_days,
+                "validation_report_path": payload.get("validation_report_path"),
+                "unknown_resources": [
+                    item for item in payload.get("unknown_resources", []) if isinstance(item, dict)
+                ],
+            }
+
+        return period_payloads
 
 
 def build_validation_report(

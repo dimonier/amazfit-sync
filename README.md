@@ -21,7 +21,7 @@ Source used as implementation baseline:
 - Prefers exchanging `AMAZFIT_ACCESS_TOKEN` into a fresh `app_token` and `user_id` using the newer Zepp login flow
 - Probes a small catalog of reverse-engineered data endpoints
 - Saves successful responses into `data/raw/...`
-- Builds a normalized day-centric bundle in `data/normalized/latest.json`
+- Builds normalized day-centric bundles in monthly files under `data/normalized/YYYY/YYYY-MM.json`
 - Exports one Markdown file per day into `exports/obsidian/`
 
 ## Important limitation
@@ -126,16 +126,16 @@ Fetch only raw payloads:
 uv run main.py dump-raw
 ```
 
-Export latest normalized bundle to Obsidian Markdown:
+Export merged normalized bundles to Obsidian Markdown:
 
 ```bash
 uv run main.py export-obsidian
 ```
 
-Export from a specific normalized bundle:
+Export from a specific normalized bundle file:
 
 ```bash
-uv run main.py export-obsidian --bundle data/normalized/latest.json
+uv run main.py export-obsidian --bundle data/normalized/2026/2026-03.json
 ```
 
 ## Output layout
@@ -149,8 +149,10 @@ data/
     heart_rate/
     ...
   normalized/
-    latest.json
-    bundle_<timestamp>.json
+    2026/
+      2026-03.json
+    2025/
+      2025-12.json
   reports/
     latest_validation.json
     validation_<timestamp>.json
@@ -218,7 +220,7 @@ This is intentionally simple. The raw/normalized JSON is the source of truth. Ma
 3. Run `uv run main.py probe`.
 4. Inspect `data/reports/latest_validation.json`.
 5. If at least one endpoint works, run `uv run main.py sync`.
-6. Inspect `data/normalized/latest.json`.
+6. Inspect the monthly files in `data/normalized/`.
 7. Run `uv run main.py export-obsidian`.
 8. Point Obsidian to `exports/obsidian` or copy the generated notes into your vault structure.
 

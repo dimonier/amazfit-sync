@@ -14,6 +14,9 @@ from amazfit_sync.normalize import normalize_records
 from amazfit_sync.obsidian_export import export_bundle_to_obsidian
 from amazfit_sync.storage import JsonStorage, build_validation_report
 
+FULL_HISTORY_FROM_DATE = "1970-01-01"
+FULL_HISTORY_TO_DATE = "9999-12-31"
+
 
 def _log(message: str) -> None:
     print(message, flush=True)
@@ -55,19 +58,20 @@ def _run_sync(config: AppConfig, storage: JsonStorage) -> int:
         f"for {config.default_from_date.isoformat()}..{config.default_to_date.isoformat()}"
     )
     result = _fetch_and_store(config, storage)
-    _log("Normalizing fetched records into a day-centric bundle")
+    all_raw_records = storage.load_raw_payloads()
+    _log(f"Normalizing {len(all_raw_records)} stored raw payload(s) into monthly bundles")
     bundle = normalize_records(
-        result["raw_records"],
-        from_date=config.default_from_date.isoformat(),
-        to_date=config.default_to_date.isoformat(),
+        all_raw_records,
+        from_date=FULL_HISTORY_FROM_DATE,
+        to_date=FULL_HISTORY_TO_DATE,
         validation_report_path=result["validation_report_path"],
     )
-    bundle_path = storage.save_normalized_bundle(bundle)
+    bundle_paths = storage.save_normalized_bundle(bundle)
     successful = [item for item in result["probe_results"] if item.ok]
     _log(f"Saved validation report to {result['validation_report_path']}")
     _log(f"Successful endpoint fetches: {len(successful)} / {len(result['probe_results'])}")
     _log(f"Saved {len(result['raw_records'])} raw payload(s)")
-    _log(f"Saved normalized bundle to {bundle_path}")
+    _log(f"Saved {len(bundle_paths)} normalized monthly bundle(s) to {storage.normalized_dir}")
     return 0
 
 
@@ -235,7 +239,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     export_parser = subparsers.add_parser(
         "export-obsidian",
-        help="Render Obsidian markdown from the latest normalized bundle.",
+        help="Render Obsidian markdown from normalized period bundles.",
     )
     export_parser.add_argument(
         "--bundle",
