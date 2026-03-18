@@ -41,6 +41,7 @@ def _render_day_markdown(day: dict[str, Any]) -> str:
     sleep = day.get("sleep", {})
     activity = day.get("activity", {})
     recovery = day.get("recovery", {})
+    body = day.get("body", {})
     trends = day.get("trends", {})
     extras = day.get("extras", {})
     timezone_offset = _coerce_int(daily_summary.get("timezone_offset_minutes")) or 0
@@ -64,6 +65,8 @@ def _render_day_markdown(day: dict[str, Any]) -> str:
         sleep_baseline_minutes = _coerce_number(trends.get("sleep_minutes_rolling_avg_14d"))
         current_resting_hr = _coerce_number(recovery.get("resting_heart_rate"))
         resting_hr_baseline = _coerce_number(trends.get("resting_hr_rolling_avg_14d"))
+        current_weight = _coerce_number(body.get("weight_kg"))
+        weight_baseline = _coerce_number(trends.get("weight_rolling_avg_14d"))
 
         lines.extend(
             [
@@ -84,6 +87,12 @@ def _render_day_markdown(day: dict[str, Any]) -> str:
                     f"baseline {_format_plain_number(resting_hr_baseline)} | "
                     f"today {_format_plain_number(current_resting_hr)} "
                     f"({_format_signed_plain_delta(current_resting_hr, resting_hr_baseline)})"
+                ),
+                (
+                    "- Weight: "
+                    f"baseline {_format_measurement(weight_baseline, 'kg')} | "
+                    f"today {_format_measurement(current_weight, 'kg')} "
+                    f"({_format_signed_delta(current_weight, weight_baseline, 'kg')})"
                 ),
                 "",
             ]
@@ -108,6 +117,16 @@ def _render_day_markdown(day: dict[str, Any]) -> str:
         lines.extend([f"- {hour}: {steps}" for hour, steps in hourly_steps.items()])
     else:
         lines.append("- No hourly step distribution available.")
+
+    lines.extend(
+        [
+            "",
+            "## Body",
+            f"- Weight: {_format_measurement(body.get('weight_kg'), 'kg')}",
+            f"- BMI: {_format_plain_number(body.get('bmi'))}",
+            f"- Body fat: {_format_percent(body.get('body_fat_pct'))}",
+        ]
+    )
 
     lines.extend(
         [
@@ -153,6 +172,7 @@ def _prepare_days_for_export(days: Any) -> list[dict[str, Any]]:
         day["extras"] = dict(source_day.get("extras", {}))
         day["activity"] = dict(source_day.get("activity") or _fallback_activity(day))
         day["recovery"] = dict(source_day.get("recovery") or _fallback_recovery(day))
+        day["body"] = dict(source_day.get("body") or _fallback_body(day))
         day["trends"] = dict(source_day.get("trends") or {})
         prepared_days.append(day)
 
@@ -166,6 +186,7 @@ def _build_frontmatter(
     activity: dict[str, Any],
     recovery: dict[str, Any],
 ) -> list[str]:
+    body = day.get("body", {})
     payload = {
         "date": day["date"],
         "steps_total": _coerce_int(daily_summary.get("steps_total")),
@@ -180,6 +201,9 @@ def _build_frontmatter(
         "longest_activity_session_minutes": _coerce_int(activity.get("longest_activity_bout_minutes")),
         "peak_activity_hour": activity.get("peak_activity_hour"),
         "peak_steps_per_minute": _coerce_number(activity.get("peak_steps_per_minute")),
+        "weight_kg": _coerce_number(body.get("weight_kg")),
+        "bmi": _coerce_number(body.get("bmi")),
+        "body_fat_pct": _coerce_number(body.get("body_fat_pct")),
     }
     lines = ["---"]
     for key, value in payload.items():
@@ -335,8 +359,10 @@ def _has_trend_data(trends: dict[str, Any]) -> bool:
             "steps_rolling_avg_14d",
             "sleep_minutes_rolling_avg_14d",
             "resting_hr_rolling_avg_14d",
+            "weight_rolling_avg_14d",
             "goal_hit_rate_14d",
             "resting_hr_delta_14d",
+            "weight_delta_14d",
         )
     )
 
@@ -400,6 +426,26 @@ def _fallback_recovery(day: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fallback_body(day: dict[str, Any]) -> dict[str, Any]:
+    items = day.get("body_metrics", [])
+    if not isinstance(items, list) or not items:
+        return {}
+
+    latest_item = max(items, key=_body_metric_sort_key)
+    summary = latest_item.get("summary")
+    if not isinstance(summary, dict):
+        summary = latest_item
+
+    return {
+        "measured_at": _datetime_from_value(
+            _first_present(latest_item, "generatedTime", "createTime", "timestamp", "time")
+        ),
+        "weight_kg": _round_number(_coerce_number(summary.get("weight")), digits=1),
+        "bmi": _round_number(_coerce_number(summary.get("bmi")), digits=1),
+        "body_fat_pct": _round_number(_coerce_number(summary.get("fatRate")), digits=1),
+    }
+
+
 def _populate_missing_trends(days: list[dict[str, Any]]) -> None:
     dated_days = [(date.fromisoformat(day["date"]), day) for day in days]
     for idx, (current_date, day) in enumerate(dated_days):
@@ -422,19 +468,28 @@ def _populate_missing_trends(days: list[dict[str, Any]]) -> None:
         resting_hr_avg = _average(
             _coerce_number(previous.get("recovery", {}).get("resting_heart_rate")) for previous in prior_days
         )
+        weight_avg = _average(
+            _coerce_number(previous.get("body", {}).get("weight_kg")) for previous in prior_days
+        )
         goal_hit_rate = _goal_hit_rate(prior_days)
         current_rhr = _coerce_number(day.get("recovery", {}).get("resting_heart_rate"))
         resting_hr_delta = None
         if current_rhr is not None and resting_hr_avg is not None:
             resting_hr_delta = round(float(current_rhr) - float(resting_hr_avg), 1)
+        current_weight = _coerce_number(day.get("body", {}).get("weight_kg"))
+        weight_delta = None
+        if current_weight is not None and weight_avg is not None:
+            weight_delta = round(float(current_weight) - float(weight_avg), 1)
 
         day["trends"] = {
             "window_days_14d": len(prior_days),
             "steps_rolling_avg_14d": steps_avg,
             "sleep_minutes_rolling_avg_14d": sleep_avg,
             "resting_hr_rolling_avg_14d": resting_hr_avg,
+            "weight_rolling_avg_14d": weight_avg,
             "goal_hit_rate_14d": goal_hit_rate,
             "resting_hr_delta_14d": resting_hr_delta,
+            "weight_delta_14d": weight_delta,
         }
 
 
@@ -498,6 +553,51 @@ def _average(values: Any) -> float | None:
     if not numeric_values:
         return None
     return round(sum(numeric_values) / len(numeric_values), 1)
+
+
+def _first_present(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in item and item[key] is not None:
+            return item[key]
+    return None
+
+
+def _body_metric_sort_key(item: dict[str, Any]) -> tuple[int, int]:
+    generated_at = _coerce_int(item.get("generatedTime"))
+    created_at = _coerce_int(item.get("createTime"))
+    return (
+        generated_at or created_at or 0,
+        created_at or generated_at or 0,
+    )
+
+
+def _datetime_from_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        if value.isdigit():
+            try:
+                return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+            except (OSError, OverflowError, ValueError):
+                return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+        except ValueError:
+            return None
+
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
+    return None
+
+
+def _round_number(value: int | float | None, *, digits: int = 1) -> int | float | None:
+    if value is None:
+        return None
+    rounded = round(float(value), digits)
+    if rounded.is_integer():
+        return int(rounded)
+    return rounded
 
 
 def _build_hourly_steps(step_stage_summary: Any, step_stages: Any) -> dict[int, int]:

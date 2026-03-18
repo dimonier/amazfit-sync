@@ -30,6 +30,8 @@ def normalize_records(
                 _merge_band_data(day_map, record)
             elif record.resource == "run_detail":
                 _merge_run_detail(day_map, record)
+            elif record.resource == "weight_records":
+                _merge_generic_resource(day_map, record)
             else:
                 handled = _merge_generic_resource(day_map, record)
                 if not handled:
@@ -171,7 +173,7 @@ def _merge_generic_resource(
             or "sport" in record.resource
         ):
             day_record.workouts.extend(items)
-        elif "body" in record.resource:
+        elif "body" in record.resource or "weight" in record.resource:
             day_record.body_metrics.extend(items)
         elif "sleep" in record.resource:
             day_record.extras.setdefault(record.resource, []).extend(items)
@@ -217,7 +219,16 @@ def _extract_run_detail_payload(payload: Any) -> dict[str, Any] | None:
 
 
 def _derive_item_date(item: dict[str, Any]) -> str | None:
-    for key in ("date", "day", "record_date", "recordDate", "summary_date", "date_time"):
+    for key in (
+        "date",
+        "day",
+        "record_date",
+        "recordDate",
+        "summary_date",
+        "date_time",
+        "generatedTime",
+        "createTime",
+    ):
         value = item.get(key)
         parsed = _date_from_value(value)
         if parsed:
@@ -290,6 +301,7 @@ def _populate_day_metrics(days: list[DayRecord]) -> None:
             day_record.extras.get("step_stages", []),
         )
         day_record.recovery = _build_recovery_metrics(day_record.sleep)
+        day_record.body = _build_body_metrics(day_record.body_metrics)
 
     _populate_trends(days)
 
@@ -349,6 +361,50 @@ def _build_recovery_metrics(sleep: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_body_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
+    if not items:
+        return {}
+
+    latest_item = max(items, key=_body_metric_sort_key)
+    summary = latest_item.get("summary")
+    if not isinstance(summary, dict):
+        summary = latest_item
+
+    weight_kg = _coerce_float(summary.get("weight"))
+    if weight_kg is None:
+        weight_grams = _coerce_float(summary.get("weight_grams"))
+        if weight_grams is not None:
+            weight_kg = weight_grams / 1000.0
+
+    return {
+        "measured_at": _datetime_from_value(
+            _first_present(latest_item, "generatedTime", "createTime", "timestamp", "time")
+        ),
+        "weight_kg": _round_float(weight_kg, digits=1),
+        "bmi": _round_float(_coerce_float(summary.get("bmi")), digits=1),
+        "body_fat_pct": _round_float(_coerce_float(summary.get("fatRate")), digits=1),
+        "body_water_pct": _round_float(_coerce_float(summary.get("bodyWaterRate")), digits=1),
+        "bone_mass_kg": _round_float(_coerce_float(summary.get("boneMass")), digits=2),
+        "muscle_pct": _round_float(_coerce_float(summary.get("muscleRate")), digits=1),
+        "protein_pct": _round_float(_coerce_float(summary.get("proteinRatio")), digits=1),
+        "metabolism_kcal": _coerce_int(summary.get("metabolism")),
+        "visceral_fat": _round_float(_coerce_float(summary.get("visceralFat")), digits=1),
+        "body_score": _coerce_int(summary.get("bodyScore")),
+        "source": _coerce_int(summary.get("source")),
+        "data_source_type": _coerce_int(summary.get("dataSourceType")),
+        "device_source": _coerce_int(latest_item.get("deviceSource")),
+    }
+
+
+def _body_metric_sort_key(item: dict[str, Any]) -> tuple[int, int]:
+    generated_at = _timestamp_to_epoch(item.get("generatedTime"))
+    created_at = _timestamp_to_epoch(item.get("createTime"))
+    return (
+        generated_at or created_at or 0,
+        created_at or generated_at or 0,
+    )
+
+
 def _populate_trends(days: list[DayRecord]) -> None:
     dated_days = [(date.fromisoformat(day_record.date), day_record) for day_record in days]
 
@@ -369,6 +425,7 @@ def _populate_trends(days: list[DayRecord]) -> None:
         resting_hr_avg = _average(
             _coerce_float(previous.recovery.get("resting_heart_rate")) for previous in prior_days
         )
+        weight_avg = _average(_coerce_float(previous.body.get("weight_kg")) for previous in prior_days)
         goal_hit_rate = _goal_hit_rate(prior_days)
 
         current_rhr = _coerce_float(day_record.recovery.get("resting_heart_rate"))
@@ -376,13 +433,20 @@ def _populate_trends(days: list[DayRecord]) -> None:
         if current_rhr is not None and resting_hr_avg is not None:
             resting_hr_delta = round(current_rhr - resting_hr_avg, 1)
 
+        current_weight = _coerce_float(day_record.body.get("weight_kg"))
+        weight_delta = None
+        if current_weight is not None and weight_avg is not None:
+            weight_delta = round(current_weight - weight_avg, 1)
+
         day_record.trends = {
             "window_days_14d": len(prior_days),
             "steps_rolling_avg_14d": steps_avg,
             "sleep_minutes_rolling_avg_14d": sleep_avg,
             "resting_hr_rolling_avg_14d": resting_hr_avg,
+            "weight_rolling_avg_14d": weight_avg,
             "goal_hit_rate_14d": goal_hit_rate,
             "resting_hr_delta_14d": resting_hr_delta,
+            "weight_delta_14d": weight_delta,
         }
 
 
@@ -473,6 +537,41 @@ def _date_from_value(value: Any) -> str | None:
         except (OSError, OverflowError, ValueError):
             return None
     return None
+
+
+def _datetime_from_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        if value.isdigit():
+            try:
+                return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+            except (OSError, OverflowError, ValueError):
+                return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+        except ValueError:
+            return None
+
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
+    return None
+
+
+def _timestamp_to_epoch(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_float(value: float | None, *, digits: int = 1) -> float | None:
+    if value is None:
+        return None
+    return round(value, digits)
 
 
 def _coerce_int(value: Any) -> int | None:

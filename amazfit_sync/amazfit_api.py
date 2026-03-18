@@ -63,6 +63,8 @@ DEFAULT_ENDPOINTS = (
     ),
 )
 RUN_DETAIL_ENDPOINT = "/v1/sport/run/detail.json"
+WEIGHT_RECORDS_ENDPOINT_TEMPLATE = "/users/{user_id}/members/-1/weightRecords"
+WEIGHT_RECORDS_RESOURCE = "weight_records"
 
 
 class AmazfitApiError(RuntimeError):
@@ -284,7 +286,7 @@ class AmazfitApiClient:
         app_candidates = candidates or build_endpoint_candidates(self.config.extra_app_endpoints)
 
         credentials = credentials or self.resolve_app_credentials()
-        total_app_requests = len(self.config.api_hosts) * len(app_candidates)
+        total_app_requests = len(self.config.api_hosts) * (len(app_candidates) + 1)
         app_request_index = 0
         for host in self.config.api_hosts:
             if progress is not None:
@@ -328,6 +330,46 @@ class AmazfitApiClient:
                         http_status=record.http_status,
                     )
                 )
+
+            app_request_index += 1
+            weight_endpoint = WEIGHT_RECORDS_ENDPOINT_TEMPLATE.format(
+                user_id=credentials["user_id"]
+            )
+            if progress is not None:
+                progress(
+                    f"[{app_request_index}/{total_app_requests}] "
+                    f"Fetching {WEIGHT_RECORDS_RESOURCE} from {host}{weight_endpoint}"
+                )
+            try:
+                record = self.fetch_weight_records_endpoint(
+                    host=host,
+                    app_token=credentials["app_token"],
+                    user_id=credentials["user_id"],
+                    from_date=from_date,
+                )
+            except AmazfitApiError as exc:
+                probe_results.append(
+                    EndpointProbeResult(
+                        resource=WEIGHT_RECORDS_RESOURCE,
+                        host=host,
+                        endpoint=weight_endpoint,
+                        ok=False,
+                        http_status=getattr(exc, "http_status", None),
+                        error=str(exc),
+                    )
+                )
+                continue
+
+            raw_records.append(record)
+            probe_results.append(
+                EndpointProbeResult(
+                    resource=WEIGHT_RECORDS_RESOURCE,
+                    host=host,
+                    endpoint=weight_endpoint,
+                    ok=True,
+                    http_status=record.http_status,
+                )
+            )
 
         total_bearer_requests = len(self.config.bearer_probe_endpoints)
         for bearer_index, endpoint in enumerate(self.config.bearer_probe_endpoints, start=1):
@@ -406,6 +448,44 @@ class AmazfitApiClient:
             endpoint=candidate.endpoint,
             params=params,
             fetched_at=fetched_at,
+            http_status=response.status_code,
+            payload=payload,
+        )
+
+    def fetch_weight_records_endpoint(
+        self,
+        *,
+        host: str,
+        app_token: str,
+        user_id: str,
+        from_date: date,
+    ) -> RawPayloadRecord:
+        """Fetch body weight records from the private Zepp/Huami endpoint."""
+        endpoint = WEIGHT_RECORDS_ENDPOINT_TEMPLATE.format(user_id=user_id)
+        url = f"{host.rstrip('/')}{endpoint}"
+        params = {
+            "userid": user_id,
+            "from_date": from_date.isoformat(),
+            "fromTime": _date_to_epoch(from_date),
+        }
+        try:
+            response = self.session.get(
+                url,
+                params={"fromTime": params["fromTime"]},
+                headers={**self.ZEPP_API_HEADERS, "apptoken": app_token},
+                timeout=self.config.request_timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise AmazfitApiError(
+                f"Weight records request failed on {host}: {exc}"
+            ) from exc
+        payload = _decode_json_response(response)
+        return RawPayloadRecord(
+            resource=WEIGHT_RECORDS_RESOURCE,
+            host=host,
+            endpoint=endpoint,
+            params=params,
+            fetched_at=datetime.now(timezone.utc).isoformat(),
             http_status=response.status_code,
             payload=payload,
         )
@@ -652,3 +732,7 @@ def _timestamp_to_date(value: Any) -> str | None:
         return datetime.fromtimestamp(int(value), tz=timezone.utc).date().isoformat()
     except (TypeError, ValueError, OSError, OverflowError):
         return None
+
+
+def _date_to_epoch(value: date) -> int:
+    return int(datetime(value.year, value.month, value.day, tzinfo=timezone.utc).timestamp())

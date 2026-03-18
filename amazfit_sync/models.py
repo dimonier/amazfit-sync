@@ -44,6 +44,7 @@ class DayRecord:
     heart_rate: list[dict[str, Any]] = field(default_factory=list)
     workouts: list[dict[str, Any]] = field(default_factory=list)
     body_metrics: list[dict[str, Any]] = field(default_factory=list)
+    body: dict[str, Any] = field(default_factory=dict)
     extras: dict[str, Any] = field(default_factory=dict)
     source_payload_ref: list[str] = field(default_factory=list)
 

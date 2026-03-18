@@ -20,6 +20,7 @@ Source used as implementation baseline:
 - Reads credentials from `.env`
 - Prefers exchanging `AMAZFIT_ACCESS_TOKEN` into a fresh `app_token` and `user_id` using the newer Zepp login flow
 - Probes a small catalog of reverse-engineered data endpoints
+- Fetches body weight from the private `weightRecords` endpoint when the account exposes it
 - Saves successful responses into `data/raw/...`
 - Builds normalized day-centric bundles in monthly files under `data/normalized/YYYY/YYYY-MM.json`
 - Exports one Markdown file per day into `exports/obsidian/`
@@ -34,6 +35,8 @@ The data endpoints in this repo are a best-effort implementation based on older 
 - require direct bearer-auth endpoints instead of the old `apptoken` flow
 
 Because of that, the first command you should run is `probe`, not `sync`.
+
+Weight import is also reverse-engineered. In this repo it uses a private endpoint under `/users/{user_id}/members/-1/weightRecords`, not the official public Huami Web API.
 
 ## Project structure
 
@@ -146,6 +149,7 @@ Runtime artifacts are ignored by git and stored locally:
 data/
   raw/
     band_summary/
+    weight_records/
     heart_rate/
     ...
   normalized/
@@ -192,6 +196,10 @@ The normalized bundle is day-centric and intentionally stable even if raw payloa
       "heart_rate": [],
       "workouts": [],
       "body_metrics": [],
+      "body": {
+        "weight_kg": 91.8,
+        "bmi": 27.1
+      },
       "extras": {},
       "source_payload_ref": [
         "data/raw/band_summary/..."
@@ -206,6 +214,7 @@ The normalized bundle is day-centric and intentionally stable even if raw payloa
 Each day is rendered to one markdown file:
 
 - frontmatter with date and core metrics
+- weight and body summary when available
 - summary section
 - sleep section
 - optional JSON blocks for workouts, heart rate, body metrics, and extras
@@ -243,6 +252,7 @@ This is intentionally simple. The raw/normalized JSON is the source of truth. Ma
   - `https://api-mifit.zepp.com/v1/data/band_data.json`
   - `https://api-mifit.zepp.com/v1/sport/run/history.json`
   - `https://api-mifit.zepp.com/v1/sport/run/detail.json`
+  - `https://api-mifit.zepp.com/users/<user_id>/members/-1/weightRecords`
 - Confirmed non-working guesses in this workspace:
   - `sleep_data.json` -> `404`
   - `activity_data.json` -> `404`
