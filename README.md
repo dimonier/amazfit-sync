@@ -38,21 +38,6 @@ Because of that, the first command you should run is `probe`, not `sync`.
 
 Weight import is also reverse-engineered. In this repo it uses a private endpoint under `/users/{user_id}/members/-1/weightRecords`, not the official public Huami Web API.
 
-## Project structure
-
-```text
-main.py
-amazfit_sync/
-  amazfit_api.py
-  config.py
-  models.py
-  normalize.py
-  obsidian_export.py
-  pipeline.py
-  storage.py
-.env.example
-```
-
 ## Environment variables
 
 Copy `.env.example` to `.env` and fill it.
@@ -100,8 +85,6 @@ uv sync
 ```
 
 Run the CLI through `uv run main.py ...`.
-
-Although `pyproject.toml` defines a project script named `amazfit-sync`, `uv sync` currently skips installing entry points because this project is not packaged yet. That means `uv run amazfit-sync ...` does not work in the current repo state.
 
 ## CLI usage
 
