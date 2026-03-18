@@ -40,7 +40,7 @@ Weight import is also reverse-engineered. In this repo it uses a private endpoin
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and fill it.
+Copy `.env.example` to `.env` and fill it with the data you get using https://github.com/argrento/huami-token.
 
 Required in the common path:
 
@@ -207,14 +207,15 @@ This is intentionally simple. The raw/normalized JSON is the source of truth. Ma
 
 ## Practical workflow
 
-1. Fill `.env`.
-2. Run `uv sync`.
-3. Run `uv run main.py probe`.
-4. Inspect `data/reports/latest_validation.json`.
-5. If at least one endpoint works, run `uv run main.py sync`.
-6. Inspect the monthly files in `data/normalized/`.
-7. Run `uv run main.py export-obsidian`.
-8. Point Obsidian to `exports/obsidian` or copy the generated notes into your vault structure.
+1. Get your `AMAZFIT_ACCESS_TOKEN` and `AMAZFIT_REFRESH_TOKEN` using https://github.com/argrento/huami-token.
+2. Fill `.env`.
+3. Run `uv sync`.
+4. Run `uv run main.py probe`.
+5. Inspect `data/reports/latest_validation.json`.
+6. If at least one endpoint works, run `uv run main.py sync`.
+7. Inspect the monthly files in `data/normalized/`.
+8. Run `uv run main.py export-obsidian`.
+9. Point Obsidian to `exports/obsidian` or copy the generated notes into your vault structure.
 
 ## Security notes
 
