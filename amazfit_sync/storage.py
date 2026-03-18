@@ -50,15 +50,31 @@ class JsonStorage:
     ) -> Path:
         timestamp = _timestamp_slug(bundle.generated_at)
         snapshot = self.normalized_dir / f"bundle_{timestamp}.json"
-        payload = bundle.to_dict()
+        payload = self._merge_normalized_payloads(
+            [
+                *self._load_normalized_payloads(),
+                bundle.to_dict(),
+            ]
+        )
         self._write_json(snapshot, payload)
         latest = self.normalized_dir / latest_name
         self._write_json(latest, payload)
         return snapshot
 
     def load_normalized_bundle(self, path: Path | None = None) -> dict[str, Any]:
-        target = path or (self.normalized_dir / "latest.json")
-        return json.loads(target.read_text(encoding="utf-8"))
+        if path is not None:
+            return json.loads(path.read_text(encoding="utf-8"))
+
+        payloads = self._load_normalized_payloads()
+        if not payloads:
+            raise FileNotFoundError(f"Normalized bundle not found in {self.normalized_dir.as_posix()}")
+
+        merged_payload = self._merge_normalized_payloads(payloads)
+        latest_path = self.normalized_dir / "latest.json"
+        current_latest = payloads[-1] if latest_path.exists() else None
+        if current_latest != merged_payload:
+            self._write_json(latest_path, merged_payload)
+        return merged_payload
 
     def latest_normalized_path(self) -> Path:
         return self.normalized_dir / "latest.json"
@@ -69,6 +85,82 @@ class JsonStorage:
             json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True),
             encoding="utf-8",
         )
+
+    def _load_normalized_payloads(self) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        if not self.normalized_dir.exists():
+            return payloads
+
+        latest_path = self.normalized_dir / "latest.json"
+        snapshot_paths = sorted(self.normalized_dir.glob("bundle_*.json"))
+        for candidate in [*snapshot_paths, latest_path]:
+            if not candidate.exists():
+                continue
+            payloads.append(json.loads(candidate.read_text(encoding="utf-8")))
+        return payloads
+
+    def _merge_normalized_payloads(self, payloads: list[dict[str, Any]]) -> dict[str, Any]:
+        merged_days: dict[str, dict[str, Any]] = {}
+        resources: set[str] = set()
+        unknown_resources: list[dict[str, Any]] = []
+        unknown_signatures: set[str] = set()
+        generated_at: str | None = None
+        validation_report_path: str | None = None
+        fallback_date_range: dict[str, str] | None = None
+
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+
+            payload_date_range = payload.get("date_range")
+            if isinstance(payload_date_range, dict):
+                from_date = payload_date_range.get("from")
+                to_date = payload_date_range.get("to")
+                if isinstance(from_date, str) and isinstance(to_date, str):
+                    fallback_date_range = {"from": from_date, "to": to_date}
+
+            generated_at_value = payload.get("generated_at")
+            if isinstance(generated_at_value, str):
+                generated_at = generated_at_value
+
+            validation_report_value = payload.get("validation_report_path")
+            if isinstance(validation_report_value, str):
+                validation_report_path = validation_report_value
+
+            for resource in payload.get("resources", []):
+                if isinstance(resource, str):
+                    resources.add(resource)
+
+            for item in payload.get("unknown_resources", []):
+                if not isinstance(item, dict):
+                    continue
+                signature = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                if signature in unknown_signatures:
+                    continue
+                unknown_signatures.add(signature)
+                unknown_resources.append(item)
+
+            for day in payload.get("days", []):
+                if not isinstance(day, dict):
+                    continue
+                day_date = day.get("date")
+                if isinstance(day_date, str):
+                    merged_days[day_date] = day
+
+        ordered_dates = sorted(merged_days)
+        if ordered_dates:
+            date_range = {"from": ordered_dates[0], "to": ordered_dates[-1]}
+        else:
+            date_range = fallback_date_range or {"from": "", "to": ""}
+
+        return {
+            "generated_at": generated_at or _utc_now(),
+            "date_range": date_range,
+            "resources": sorted(resources),
+            "days": [merged_days[day_date] for day_date in ordered_dates],
+            "validation_report_path": validation_report_path,
+            "unknown_resources": unknown_resources,
+        }
 
 
 def build_validation_report(
