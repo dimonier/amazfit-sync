@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import suppress
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -32,9 +32,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             Path(args.env_file) if args.env_file else None,
             require_api_credentials=require_api_credentials,
         )
-        config = _apply_runtime_overrides(config, args)
+        config = _apply_path_overrides(config, args)
         storage = JsonStorage(config.data_dir)
         storage.ensure_dirs()
+        config = _apply_runtime_date_overrides(config, args, storage)
 
         if args.command == "sync":
             return _run_sync(config, storage)
@@ -102,7 +103,12 @@ def _run_probe(config: AppConfig, storage: JsonStorage) -> int:
 
 def _run_export(config: AppConfig, storage: JsonStorage, bundle_path: str | None) -> int:
     bundle = storage.load_normalized_bundle(Path(bundle_path) if bundle_path else None)
-    written_paths = export_bundle_to_obsidian(bundle, config.obsidian_export_dir)
+    written_paths = export_bundle_to_obsidian(
+        bundle,
+        config.obsidian_export_dir,
+        config.default_from_date,
+        config.default_to_date,
+    )
     _log(f"Exported {len(written_paths)} markdown file(s) to {config.obsidian_export_dir}")
     return 0
 
@@ -203,22 +209,50 @@ def _persist_raw_record(storage: JsonStorage, record: RawPayloadRecord) -> None:
     record.raw_path = raw_path.as_posix()
 
 
-def _apply_runtime_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
-    from_date = _parse_optional_date(args.from_date) or config.default_from_date
-    to_date = _parse_optional_date(args.to_date) or config.default_to_date
-    if from_date > to_date:
-        raise ConfigError("--from cannot be after --to.")
-
+def _apply_path_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
     data_dir = Path(args.data_dir) if args.data_dir else config.data_dir
     obsidian_dir = Path(args.obsidian_dir) if args.obsidian_dir else config.obsidian_export_dir
 
     return replace(
         config,
-        default_from_date=from_date,
-        default_to_date=to_date,
         data_dir=data_dir,
         obsidian_export_dir=obsidian_dir,
     )
+
+
+def _apply_runtime_date_overrides(
+    config: AppConfig,
+    args: argparse.Namespace,
+    storage: JsonStorage,
+) -> AppConfig:
+    default_from_date, default_to_date = _resolve_default_date_range(config, args.command, storage)
+    from_date = _parse_optional_date(args.from_date) or default_from_date
+    to_date = _parse_optional_date(args.to_date) or default_to_date
+    if from_date > to_date:
+        raise ConfigError("--from cannot be after --to.")
+
+    return replace(
+        config,
+        default_from_date=from_date,
+        default_to_date=to_date,
+    )
+
+
+def _resolve_default_date_range(
+    config: AppConfig,
+    command: str,
+    storage: JsonStorage,
+) -> tuple[date, date]:
+    if command == "export-obsidian":
+        yesterday = date.today() - timedelta(days=1)
+        return yesterday, yesterday
+
+    if command == "sync":
+        latest_normalized_date = storage.latest_normalized_date()
+        if latest_normalized_date is not None:
+            return latest_normalized_date, date.today()
+
+    return config.default_from_date, config.default_to_date
 
 
 def _build_parser() -> argparse.ArgumentParser:

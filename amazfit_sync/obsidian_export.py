@@ -5,12 +5,16 @@ from pathlib import Path
 from typing import Any
 
 
-def export_bundle_to_obsidian(bundle: dict[str, Any], output_dir: Path) -> list[Path]:
-    """Write curated markdown files for yesterday and recent missing backfill days."""
+def export_bundle_to_obsidian(
+    bundle: dict[str, Any],
+    output_dir: Path,
+    *,
+    from_date: date,
+    to_date: date,
+) -> list[Path]:
+    """Write markdown files for normalized days within the requested date range."""
     output_dir.mkdir(parents=True, exist_ok=True)
     written_paths: list[Path] = []
-    yesterday = date.today() - timedelta(days=1)
-    backfill_start = yesterday - timedelta(days=14)
     prepared_days = _prepare_days_for_export(bundle.get("days", []))
 
     for day in prepared_days:
@@ -18,20 +22,13 @@ def export_bundle_to_obsidian(bundle: dict[str, Any], output_dir: Path) -> list[
         target = output_dir / f"{day['date']}-physical.md"
         legacy_target = output_dir / f"{day['date']}.md"
 
-        if day_date == yesterday:
-            _write_day_markdown(target, day)
-            written_paths.append(target)
-            if legacy_target.exists():
-                legacy_target.unlink()
-            continue
-
-        if not (backfill_start <= day_date < yesterday):
-            continue
-        if target.exists() or legacy_target.exists():
+        if not (from_date <= day_date <= to_date):
             continue
 
         _write_day_markdown(target, day)
         written_paths.append(target)
+        if legacy_target.exists():
+            legacy_target.unlink()
 
     return written_paths
 

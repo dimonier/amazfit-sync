@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,26 @@ class JsonStorage:
         if not period_paths:
             raise FileNotFoundError(f"Normalized bundles not found in {self.normalized_dir.as_posix()}")
         return period_paths[-1]
+
+    def latest_normalized_date(self) -> date | None:
+        try:
+            bundle = self.load_normalized_bundle()
+        except FileNotFoundError:
+            return None
+
+        days = bundle.get("days", [])
+        if isinstance(days, list):
+            for item in reversed(days):
+                if not isinstance(item, dict):
+                    continue
+                parsed = _parse_iso_date(item.get("date"))
+                if parsed is not None:
+                    return parsed
+
+        date_range = bundle.get("date_range", {})
+        if isinstance(date_range, dict):
+            return _parse_iso_date(date_range.get("to"))
+        return None
 
     def load_raw_payloads(self) -> list[RawPayloadRecord]:
         records: list[RawPayloadRecord] = []
@@ -270,3 +290,12 @@ def _slugify(value: str) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None

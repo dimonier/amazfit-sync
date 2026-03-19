@@ -23,7 +23,7 @@ Source used as implementation baseline:
 - Fetches body weight from the private `weightRecords` endpoint when the account exposes it
 - Saves successful responses into `data/raw/...`
 - Builds normalized day-centric bundles in monthly files under `data/normalized/YYYY/YYYY-MM.json`
-- Exports one Markdown file per day into `exports/obsidian/`
+- Exports Markdown day notes into `exports/obsidian/`
 
 ## Important limitation
 
@@ -66,6 +66,8 @@ Optional but useful:
 
 If both `AMAZFIT_ACCESS_TOKEN` and `AMAZFIT_APP_TOKEN` are present, the tool prefers the access-token exchange and generates a fresh app token for the current session. This is deliberate because stale app tokens often fail with `401 invalid token`.
 
+`OBSIDIAN_EXPORT_DIR` can be either a relative path like `exports/obsidian` or an absolute path like `D:/Obsidian-Dima/activity-reports`.
+
 If the default reverse-engineered endpoint catalog is wrong for your account/device, add your own paths:
 
 - `AMAZFIT_EXTRA_APP_ENDPOINTS` for old `apptoken`-style requests
@@ -103,6 +105,14 @@ uv run main.py probe
 Fetch data and write raw plus normalized JSON:
 
 ```bash
+uv run main.py sync
+```
+
+Without explicit dates, `sync` reuses the latest day already present in normalized data as the start date and fetches through today inclusive. If no normalized bundles exist yet, it falls back to `AMAZFIT_FROM_DATE` / `AMAZFIT_TO_DATE` or the built-in defaults.
+
+Fetch a specific date range:
+
+```bash
 uv run main.py --from 2026-03-01 --to 2026-03-15 sync
 ```
 
@@ -118,10 +128,18 @@ Export merged normalized bundles to Obsidian Markdown:
 uv run main.py export-obsidian
 ```
 
+Without explicit dates, `export-obsidian` writes only yesterday's report.
+
 Export from a specific normalized bundle file:
 
 ```bash
 uv run main.py export-obsidian --bundle data/normalized/2026/2026-03.json
+```
+
+Export a specific normalized date range:
+
+```bash
+uv run main.py --from 2026-03-10 --to 2026-03-12 export-obsidian
 ```
 
 ## Output layout
@@ -146,9 +164,8 @@ data/
 
 exports/
   obsidian/
-    2026-03-01.md
-    2026-03-02.md
-    index.md
+    2026-03-01-physical.md
+    2026-03-02-physical.md
 ```
 
 ## Normalized JSON shape
@@ -194,7 +211,11 @@ The normalized bundle is day-centric and intentionally stable even if raw payloa
 
 ## Obsidian export behavior
 
-Each day is rendered to one markdown file:
+Each exported day is rendered to one markdown file named `YYYY-MM-DD-physical.md`.
+
+By default, the command exports only yesterday. When `--from` / `--to` are provided, only days inside that inclusive range are rendered.
+
+Each exported file contains:
 
 - frontmatter with date and core metrics
 - weight and body summary when available
