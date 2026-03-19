@@ -106,8 +106,8 @@ def _run_export(config: AppConfig, storage: JsonStorage, bundle_path: str | None
     written_paths = export_bundle_to_obsidian(
         bundle,
         config.obsidian_export_dir,
-        config.default_from_date,
-        config.default_to_date,
+        from_date=config.default_from_date,
+        to_date=config.default_to_date,
     )
     _log(f"Exported {len(written_paths)} markdown file(s) to {config.obsidian_export_dir}")
     return 0
