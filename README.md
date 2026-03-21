@@ -128,7 +128,7 @@ Export merged normalized bundles to Obsidian Markdown:
 uv run main.py export-obsidian
 ```
 
-Without explicit dates, `export-obsidian` writes only yesterday's report.
+Without explicit dates, `export-obsidian` always rewrites yesterday's report and also backfills any missing reports from the previous 14 days.
 
 Export from a specific normalized bundle file:
 
@@ -213,7 +213,7 @@ The normalized bundle is day-centric and intentionally stable even if raw payloa
 
 Each exported day is rendered to one markdown file named `YYYY-MM-DD-physical.md`.
 
-By default, the command exports only yesterday. When `--from` / `--to` are provided, only days inside that inclusive range are rendered.
+By default, the command always rewrites yesterday and creates any missing files from the previous 14 days. When `--from` / `--to` are provided, only days inside that inclusive range are rendered and the selected files are rewritten.
 
 Each exported file contains:
 

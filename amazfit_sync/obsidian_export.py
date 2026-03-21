@@ -11,6 +11,8 @@ def export_bundle_to_obsidian(
     *,
     from_date: date,
     to_date: date,
+    preserve_existing: bool = False,
+    always_overwrite_date: date | None = None,
 ) -> list[Path]:
     """Write markdown files for normalized days within the requested date range."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -24,6 +26,9 @@ def export_bundle_to_obsidian(
 
         if not (from_date <= day_date <= to_date):
             continue
+        if preserve_existing and day_date != always_overwrite_date:
+            if target.exists() or legacy_target.exists():
+                continue
 
         _write_day_markdown(target, day)
         written_paths.append(target)

@@ -42,7 +42,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "dump-raw":
             return _run_dump_raw(config, storage)
         if args.command == "export-obsidian":
-            return _run_export(config, storage, args.bundle)
+            return _run_export(
+                config,
+                storage,
+                args.bundle,
+                has_explicit_date_range=args.from_date is not None or args.to_date is not None,
+            )
         if args.command == "probe":
             return _run_probe(config, storage)
     except (ConfigError, AmazfitApiError, FileNotFoundError) as exc:
@@ -101,13 +106,24 @@ def _run_probe(config: AppConfig, storage: JsonStorage) -> int:
     return 0
 
 
-def _run_export(config: AppConfig, storage: JsonStorage, bundle_path: str | None) -> int:
+def _run_export(
+    config: AppConfig,
+    storage: JsonStorage,
+    bundle_path: str | None,
+    *,
+    has_explicit_date_range: bool,
+) -> int:
     bundle = storage.load_normalized_bundle(Path(bundle_path) if bundle_path else None)
+    export_options = {
+        "from_date": config.default_from_date,
+        "to_date": config.default_to_date,
+        "preserve_existing": not has_explicit_date_range,
+        "always_overwrite_date": None if has_explicit_date_range else config.default_to_date,
+    }
     written_paths = export_bundle_to_obsidian(
         bundle,
         config.obsidian_export_dir,
-        from_date=config.default_from_date,
-        to_date=config.default_to_date,
+        **export_options,
     )
     _log(f"Exported {len(written_paths)} markdown file(s) to {config.obsidian_export_dir}")
     return 0
@@ -245,7 +261,7 @@ def _resolve_default_date_range(
 ) -> tuple[date, date]:
     if command == "export-obsidian":
         yesterday = date.today() - timedelta(days=1)
-        return yesterday, yesterday
+        return yesterday - timedelta(days=14), yesterday
 
     if command == "sync":
         latest_normalized_date = storage.latest_normalized_date()
