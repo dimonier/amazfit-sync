@@ -18,7 +18,9 @@ Source used as implementation baseline:
 ## What the tool does
 
 - Reads credentials from `.env`
-- Prefers exchanging `AMAZFIT_ACCESS_TOKEN` into a fresh `app_token` and `user_id` using the newer Zepp login flow
+- Loads local auth state from `data/auth_state.json` by default
+- Prefers existing `app_token` and `user_id` from local state or `.env`
+- Falls back to access-token refresh and Zepp login exchange only when cached app credentials are missing or rejected
 - Probes a small catalog of reverse-engineered data endpoints
 - Fetches body weight from the private `weightRecords` endpoint when the account exposes it
 - Saves successful responses into `data/raw/...`
@@ -55,6 +57,7 @@ Optional but useful:
 - `AMAZFIT_ACCOUNT_BASE_URL`
 - `AMAZFIT_API_HOSTS`
 - `AMAZFIT_TOKEN_REFRESH_URL`
+- `AMAZFIT_AUTH_STATE_PATH`
 - `AMAZFIT_BEARER_API_BASE_URL`
 - `AMAZFIT_BEARER_PROBE_ENDPOINTS`
 - `AMAZFIT_ZEPP_LOGIN_URL`
@@ -64,7 +67,9 @@ Optional but useful:
 - `AMAZFIT_FROM_DATE`
 - `AMAZFIT_TO_DATE`
 
-If both `AMAZFIT_ACCESS_TOKEN` and `AMAZFIT_APP_TOKEN` are present, the tool prefers the access-token exchange and generates a fresh app token for the current session. This is deliberate because stale app tokens often fail with `401 invalid token`.
+If both `AMAZFIT_ACCESS_TOKEN` and `AMAZFIT_APP_TOKEN` are present, the tool now prefers the cached app credentials first. It only falls back to refresh or Zepp login exchange when the cached app token is missing or when a data endpoint responds with `401`.
+
+When `AMAZFIT_DEVICE_ID` is not provided, the tool generates a stable device identifier once and stores it in the local auth state file. It no longer sends a different random device identifier on every run.
 
 `OBSIDIAN_EXPORT_DIR` can be either a relative path like `exports/obsidian` or an absolute path like `D:/Obsidian-Dima/activity-reports`.
 
@@ -241,9 +246,11 @@ This is intentionally simple. The raw/normalized JSON is the source of truth. Ma
 ## Security notes
 
 - `.env` is ignored by git.
+- `data/auth_state.json` is also local-only and may contain live tokens, so treat it as sensitive.
 - The tool does not print token values.
 - Raw API payloads are stored locally, so treat `data/` as sensitive.
 - Token refresh is only attempted if `AMAZFIT_TOKEN_REFRESH_URL` is explicitly configured.
+- Cached app credentials are preferred over password-style or access-token login flows to reduce unnecessary account re-logins and device/session churn.
 - Probe results are written even when endpoint validation fails, so you can inspect exact HTTP status codes.
 
 ## What was verified in this repo

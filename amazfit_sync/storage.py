@@ -262,14 +262,18 @@ def build_validation_report(
     probe_results: list[EndpointProbeResult],
     exchange_status: str,
     exchange_error: str | None = None,
+    auth: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    report = {
         "generated_at": _utc_now(),
         "date_range": {"from": from_date, "to": to_date},
         "exchange_status": exchange_status,
         "exchange_error": exchange_error,
         "probe_results": [result.to_dict() for result in probe_results],
     }
+    if auth:
+        report["auth"] = auth
+    return report
 
 
 def _timestamp_slug(value: str) -> str:

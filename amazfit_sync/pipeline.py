@@ -140,6 +140,7 @@ def _fetch_and_store(
     probe_results = []
     exchange_status = "not_attempted"
     exchange_error = None
+    auth_details: dict[str, object] = {}
 
     client = AmazfitApiClient(config)
     try:
@@ -156,16 +157,19 @@ def _fetch_and_store(
             _log("Resolving app credentials")
             credentials = client.resolve_app_credentials()
             exchange_status = f"ok:{credentials['credential_source']}"
+            auth_details = client.auth_diagnostics()
             _log(f"Resolved app credentials using {credentials['credential_source']}")
         except AmazfitApiError as exc:
             exchange_status = "failed"
             exchange_error = str(exc)
+            auth_details = client.auth_diagnostics()
             validation_report = build_validation_report(
                 from_date=config.default_from_date.isoformat(),
                 to_date=config.default_to_date.isoformat(),
                 probe_results=probe_results,
                 exchange_status=exchange_status,
                 exchange_error=exchange_error,
+                auth=auth_details,
             )
             validation_path = storage.save_validation_report(validation_report)
             raise AmazfitApiError(
@@ -179,6 +183,10 @@ def _fetch_and_store(
             credentials=credentials,
             progress=_log,
         )
+        auth_details = client.auth_diagnostics()
+        final_credential_source = auth_details.get("credential_source")
+        if isinstance(final_credential_source, str):
+            exchange_status = f"ok:{final_credential_source}"
         successful_probes = [probe for probe in probe_results if probe.ok]
         _log(f"Completed endpoint fetches: {len(successful_probes)} / {len(probe_results)} successful")
         if persist_raw:
@@ -209,6 +217,7 @@ def _fetch_and_store(
         probe_results=probe_results,
         exchange_status=exchange_status,
         exchange_error=exchange_error,
+        auth=auth_details or client.auth_diagnostics(),
     )
     validation_path = storage.save_validation_report(validation_report)
     _log(f"Validation report written to {validation_path.as_posix()}")

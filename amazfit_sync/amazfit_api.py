@@ -9,7 +9,8 @@ from typing import Any, Callable
 
 import requests
 
-from amazfit_sync.config import AppConfig, mask_secret
+from amazfit_sync.auth_state import AuthStateStore
+from amazfit_sync.config import AppConfig, DEFAULT_DEVICE_ID, mask_secret
 from amazfit_sync.models import EndpointProbeResult, RawPayloadRecord
 
 
@@ -95,7 +96,13 @@ class AmazfitApiClient:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.state_store = AuthStateStore(config.auth_state_path)
         self.session = requests.Session()
+        self.refresh_status = "not_attempted"
+        self.refresh_error: str | None = None
+        self.last_credential_source: str | None = None
+        self.reauth_triggered = False
+        self._refresh_succeeded = False
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -105,81 +112,27 @@ class AmazfitApiClient:
                 ),
             }
         )
+        self._ensure_stable_device_id()
 
     def close(self) -> None:
         self.session.close()
 
-    def resolve_app_credentials(self) -> dict[str, str]:
+    def resolve_app_credentials(self, *, force_exchange: bool = False) -> dict[str, str]:
         """Return app-level credentials for Huami data endpoints."""
-        if self.config.access_token:
-            return self._resolve_zepp_app_credentials()
-
-        if self.config.has_app_credentials:
+        if not force_exchange and self.config.has_app_credentials:
+            credential_source = _cached_credential_source(self.config)
+            self.last_credential_source = credential_source
             return {
                 "app_token": self.config.app_token or "",
                 "user_id": self.config.user_id or "",
-                "credential_source": "env",
+                "credential_source": credential_source,
             }
 
         if not self.config.access_token:
             raise AmazfitApiError(
                 "Missing app credentials and AMAZFIT_ACCESS_TOKEN is not available."
             )
-
-        zepp_error: AmazfitApiError | None = None
-        try:
-            return self._resolve_zepp_app_credentials()
-        except AmazfitApiError as exc:
-            zepp_error = exc
-
-        try:
-            response = self.session.post(
-                f"{self.config.account_base_url.rstrip('/')}/v2/client/login",
-                data={
-                    "app_name": self.config.app_name,
-                    "dn": ",".join(
-                        [
-                            "account.huami.com",
-                            "api-user.huami.com",
-                            "api-watch.huami.com",
-                            "api-analytics.huami.com",
-                            "app-analytics.huami.com",
-                            "api-mifit.huami.com",
-                        ]
-                    ),
-                    "device_id": self.config.device_id,
-                    "device_model": self.config.device_model,
-                    "app_version": self.config.app_version,
-                    "allow_registration": "false",
-                    "third_name": "huami",
-                    "grant_type": "access_token",
-                    "country_code": self.config.country_code,
-                    "code": self.config.access_token,
-                },
-                timeout=self.config.request_timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise AmazfitApiError(f"Access token exchange request failed: {exc}") from exc
-        payload = _decode_json_response(response)
-        app_token = _deep_get(payload, "token_info", "app_token") or payload.get("app_token")
-        user_id = (
-            _deep_get(payload, "token_info", "user_id")
-            or payload.get("user_id")
-            or payload.get("userid")
-        )
-        if not app_token or not user_id:
-            raise AmazfitApiError(
-                "Access token exchange did not return app_token/user_id. "
-                f"Keys present: {sorted(payload.keys())}. "
-                f"Zepp exchange error: {zepp_error}"
-            )
-        self.config.app_token = str(app_token)
-        self.config.user_id = str(user_id)
-        return {
-            "app_token": str(app_token),
-            "user_id": str(user_id),
-            "credential_source": "exchange",
-        }
+        return self._resolve_zepp_app_credentials()
 
     def _resolve_zepp_app_credentials(self) -> dict[str, str]:
         if not self.config.access_token:
@@ -189,11 +142,7 @@ class AmazfitApiClient:
 
         payload = {
             "code": self.config.access_token,
-            "device_id": (
-                str(uuid.uuid4())
-                if self.config.device_id == "02:00:00:00:00:00"
-                else self.config.device_id
-            ),
+            "device_id": self.config.device_id,
             "device_model": "android_phone",
             "app_version": "9.12.5",
             "dn": (
@@ -231,12 +180,22 @@ class AmazfitApiClient:
             )
 
         self.config.app_token = str(app_token)
+        self.config.app_token_source = "state"
         self.config.user_id = str(user_id)
+        self.config.user_id_source = "state"
         self.config.api_hosts = _merge_api_hosts(self.config.api_hosts, payload)
+        self._persist_auth_state(
+            app_token=self.config.app_token,
+            user_id=self.config.user_id,
+            access_token=self.config.access_token,
+            refresh_token=self.config.refresh_token,
+        )
+        credential_source = "refresh_then_exchange" if self._refresh_succeeded else "zepp_exchange"
+        self.last_credential_source = credential_source
         return {
             "app_token": str(app_token),
             "user_id": str(user_id),
-            "credential_source": "zepp_exchange",
+            "credential_source": credential_source,
         }
 
     def try_refresh_access_token(self) -> dict[str, Any] | None:
@@ -251,6 +210,8 @@ class AmazfitApiClient:
                 timeout=self.config.request_timeout_seconds,
             )
         except requests.RequestException as exc:
+            self.refresh_status = "failed"
+            self.refresh_error = f"Access token refresh request failed: {exc}"
             raise AmazfitApiError(f"Access token refresh request failed: {exc}") from exc
         payload = _decode_json_response(response)
         new_access_token = (
@@ -260,6 +221,7 @@ class AmazfitApiClient:
         )
         if new_access_token:
             self.config.access_token = str(new_access_token)
+            self.config.access_token_source = "state"
         new_refresh_token = (
             payload.get("refresh_token")
             or _deep_get(payload, "data", "refresh_token")
@@ -267,6 +229,14 @@ class AmazfitApiClient:
         )
         if new_refresh_token:
             self.config.refresh_token = str(new_refresh_token)
+            self.config.refresh_token_source = "state"
+        self._refresh_succeeded = bool(new_access_token)
+        self.refresh_status = "ok"
+        self.refresh_error = None
+        self._persist_auth_state(
+            access_token=self.config.access_token,
+            refresh_token=self.config.refresh_token,
+        )
         return {
             "access_token_masked": mask_secret(self.config.access_token),
             "refresh_token_masked": mask_secret(self.config.refresh_token),
@@ -299,13 +269,16 @@ class AmazfitApiClient:
                         f"Fetching {candidate.resource} from {host}{candidate.endpoint}"
                     )
                 try:
-                    record = self.fetch_data_endpoint(
-                        host=host,
-                        candidate=candidate,
-                        app_token=credentials["app_token"],
-                        user_id=credentials["user_id"],
-                        from_date=from_date,
-                        to_date=to_date,
+                    record = self._request_with_credentials(
+                        credentials,
+                        lambda current: self.fetch_data_endpoint(
+                            host=host,
+                            candidate=candidate,
+                            app_token=current["app_token"],
+                            user_id=current["user_id"],
+                            from_date=from_date,
+                            to_date=to_date,
+                        ),
                     )
                 except AmazfitApiError as exc:
                     probe_results.append(
@@ -341,11 +314,14 @@ class AmazfitApiClient:
                     f"Fetching {WEIGHT_RECORDS_RESOURCE} from {host}{weight_endpoint}"
                 )
             try:
-                record = self.fetch_weight_records_endpoint(
-                    host=host,
-                    app_token=credentials["app_token"],
-                    user_id=credentials["user_id"],
-                    from_date=from_date,
+                record = self._request_with_credentials(
+                    credentials,
+                    lambda current: self.fetch_weight_records_endpoint(
+                        host=host,
+                        app_token=current["app_token"],
+                        user_id=current["user_id"],
+                        from_date=from_date,
+                    ),
                 )
             except AmazfitApiError as exc:
                 probe_results.append(
@@ -619,6 +595,60 @@ class AmazfitApiClient:
             payload=payload,
         )
 
+    def auth_diagnostics(self) -> dict[str, Any]:
+        """Return auth metadata for validation reports."""
+        return {
+            "auth_state_path": self.config.auth_state_path.as_posix(),
+            "credential_source": self.last_credential_source,
+            "device_id_source": self.config.device_id_source,
+            "refresh_status": self.refresh_status,
+            "refresh_error": self.refresh_error,
+            "reauth_triggered": self.reauth_triggered,
+        }
+
+    def _ensure_stable_device_id(self) -> None:
+        if self.config.device_id_source == "default" or self.config.device_id == DEFAULT_DEVICE_ID:
+            self.config.device_id = str(uuid.uuid4())
+            self.config.device_id_source = "state"
+            self.state_store.update(device_id=self.config.device_id)
+            return
+
+        if self.config.device_id_source == "env":
+            self.state_store.update(device_id=self.config.device_id)
+
+    def _persist_auth_state(self, **values: str | None) -> None:
+        self.state_store.update(device_id=self.config.device_id, **values)
+
+    def _request_with_credentials(
+        self,
+        credentials: dict[str, str],
+        request: Callable[[dict[str, str]], RawPayloadRecord],
+    ) -> RawPayloadRecord:
+        try:
+            return request(credentials)
+        except AmazfitApiError as exc:
+            if not self._should_retry_with_exchange(exc, credentials):
+                raise
+
+        refreshed_credentials = self.resolve_app_credentials(force_exchange=True)
+        credentials.update(refreshed_credentials)
+        self.reauth_triggered = True
+        return request(credentials)
+
+    def _should_retry_with_exchange(
+        self,
+        exc: AmazfitApiError,
+        credentials: dict[str, str],
+    ) -> bool:
+        if getattr(exc, "http_status", None) != 401:
+            return False
+        if not self.config.access_token:
+            return False
+        return credentials.get("credential_source") not in {
+            "zepp_exchange",
+            "refresh_then_exchange",
+        }
+
 
 def decode_summary_blob(encoded_summary: str) -> dict[str, Any]:
     """Decode a base64 summary payload from band_data.json."""
@@ -670,6 +700,15 @@ def _deep_get(payload: dict[str, Any] | list[Any], *keys: str) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def _cached_credential_source(config: AppConfig) -> str:
+    app_sources = {config.app_token_source, config.user_id_source}
+    if app_sources == {"state"}:
+        return "state"
+    if app_sources == {"env"}:
+        return "env"
+    return "cached"
 
 
 def _resource_name_from_endpoint(endpoint: str) -> str:
