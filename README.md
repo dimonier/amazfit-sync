@@ -42,12 +42,18 @@ Weight import is also reverse-engineered. In this repo it uses a private endpoin
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and fill it with the data you get using https://github.com/argrento/huami-token.
+**Recommended method — extract tokens from browser (no mobile logout):**
+Run `python extract_tokens_web.py` and follow the instructions. It will guide you to log into https://watchface.zepp.com/ in your browser and extract `app_token` + `user_id` from cookies. This does **not** log you out of the Zepp mobile app.
 
-Required in the common path:
+**Alternative — huami-token (logs out mobile app):**
+Use https://github.com/argrento/huami-token to get all tokens. Then run `python refresh_tokens.py` which auto-updates `.env`.
 
-- `AMAZFIT_ACCESS_TOKEN`
-- `AMAZFIT_REFRESH_TOKEN` - optional in code path, but usually worth keeping
+Required:
+
+- `AMAZFIT_APP_TOKEN` — app-level credential for data endpoints
+- `AMAZFIT_USER_ID` — your Zepp account user ID
+- `AMAZFIT_ACCESS_TOKEN` — only needed for first-time Zepp login exchange (not needed once app_token is cached)
+- `AMAZFIT_REFRESH_TOKEN` — optional, no known working refresh endpoint exists
 
 Optional but useful:
 
