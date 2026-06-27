@@ -96,35 +96,38 @@ def _merge_band_data(day_map: dict[str, DayRecord], record: RawPayloadRecord) ->
 
         stp = summary_payload.get("stp") or {}
         if isinstance(stp, dict):
-            day_record.daily_summary.update(
-                {
-                    "steps_total": stp.get("ttl"),
-                    "distance_meters": stp.get("dis"),
-                    "calories_kcal": stp.get("cal"),
-                    "walk_minutes": stp.get("wk"),
-                    "run_distance_meters": stp.get("runDist"),
-                    "run_calories_kcal": stp.get("runCal"),
-                }
-            )
+            if record.resource != "band_detail":
+                day_record.daily_summary.update(
+                    {
+                        "steps_total": stp.get("ttl"),
+                        "distance_meters": stp.get("dis"),
+                        "calories_kcal": stp.get("cal"),
+                        "walk_minutes": stp.get("wk"),
+                        "run_distance_meters": stp.get("runDist"),
+                        "run_calories_kcal": stp.get("runCal"),
+                    }
+                )
             if "stage" in stp:
-                day_record.extras.setdefault("step_stages", stp.get("stage") or [])
+                day_record.extras.setdefault("step_stages", [])
+                day_record.extras["step_stages"].extend(stp.get("stage") or [])
             if "stepStageSummary" in stp:
                 day_record.extras.setdefault("step_stage_summary", []).extend(
                     stp.get("stepStageSummary") or []
                 )
 
-        slp = summary_payload.get("slp") or {}
-        if isinstance(slp, dict):
-            day_record.sleep.update(
-                {
-                    "sleep_start_epoch": slp.get("st"),
-                    "sleep_end_epoch": slp.get("ed"),
-                    "deep_sleep_minutes": slp.get("dp"),
-                    "light_sleep_minutes": slp.get("lt"),
-                    "resting_heart_rate": slp.get("rhr"),
-                    "stages": slp.get("stage") or [],
-                }
-            )
+        if record.resource != "band_detail":
+            slp = summary_payload.get("slp") or {}
+            if isinstance(slp, dict):
+                day_record.sleep.update(
+                    {
+                        "sleep_start_epoch": slp.get("st"),
+                        "sleep_end_epoch": slp.get("ed"),
+                        "deep_sleep_minutes": slp.get("dp"),
+                        "light_sleep_minutes": slp.get("lt"),
+                        "resting_heart_rate": slp.get("rhr"),
+                        "stages": slp.get("stage") or [],
+                    }
+                )
 
 
 def _merge_run_detail(day_map: dict[str, DayRecord], record: RawPayloadRecord) -> None:
@@ -303,6 +306,7 @@ def _populate_day_metrics(days: list[DayRecord]) -> None:
         day_record.recovery = _build_recovery_metrics(day_record.sleep)
         day_record.body = _build_body_metrics(day_record.body_metrics)
 
+    _carry_forward_body_metrics(days)
     _populate_trends(days)
 
 
@@ -403,6 +407,15 @@ def _body_metric_sort_key(item: dict[str, Any]) -> tuple[int, int]:
         generated_at or created_at or 0,
         created_at or generated_at or 0,
     )
+
+
+def _carry_forward_body_metrics(days: list[DayRecord]) -> None:
+    last_body: dict[str, Any] | None = None
+    for day_record in days:
+        if day_record.body:
+            last_body = day_record.body
+        elif last_body is not None:
+            day_record.body = dict(last_body)
 
 
 def _populate_trends(days: list[DayRecord]) -> None:

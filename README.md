@@ -4,12 +4,12 @@ Python utility for fetching Amazfit/Zepp data into local JSON storage and then e
 
 ## Current status
 
-This project is intentionally built in two stages:
+This project works in two stages:
 
 1. Fetch and persist raw API payloads plus normalized JSON.
 2. Render deterministic Markdown files for Obsidian from normalized data.
 
-That split is necessary because the public contract for modern Amazfit/Zepp endpoints is not documented well enough, and the reverse-engineered Mi Fit flow is only a starting point, not a guaranteed specification.
+The public contract for modern Amazfit/Zepp endpoints is not documented, and reverse-engineered flows are a starting point, not a guaranteed specification.
 
 Source used as implementation baseline:
 
@@ -18,18 +18,23 @@ Source used as implementation baseline:
 ## What the tool does
 
 - Reads credentials from `.env`
-- Loads local auth state from `data/auth_state.json` by default
+- Loads local auth state from `data/auth_state.json`
 - Prefers existing `app_token` and `user_id` from local state or `.env`
-- Falls back to access-token refresh and Zepp login exchange only when cached app credentials are missing or rejected
-- Probes a small catalog of reverse-engineered data endpoints
-- Fetches body weight from the private `weightRecords` endpoint when the account exposes it
+- Falls back to Zepp login exchange only when cached app credentials are missing or rejected
+- Probes a catalog of reverse-engineered data endpoints across multiple API hosts
+- Fetches daily step totals, distance, calories, and sleep data from the `band_data.json` summary endpoint
+- Extracts hourly step distribution and activity bout details from the detail endpoint
+- Fetches body weight from the private `weightRecords` endpoint
+- Fetches workout history and per-workout details from run endpoints
 - Saves successful responses into `data/raw/...`
 - Builds normalized day-centric bundles in monthly files under `data/normalized/YYYY/YYYY-MM.json`
-- Exports Markdown day notes into `exports/obsidian/`
+- Carries forward the last measured weight to days without a new measurement
+- Computes 14-day rolling trends for steps, sleep, resting HR, weight, and goal hit rate
+- Exports Markdown day notes into the configured Obsidian directory
 
 ## Important limitation
 
-The data endpoints in this repo are a best-effort implementation based on older Huami/Mi Fit behavior. For an actual `Amazfit Bip 6`, some endpoints may:
+The data endpoints are a best-effort implementation based on older Huami/Mi Fit behavior. For modern Amazfit devices, some endpoints may:
 
 - still work as-is
 - require different hostnames
@@ -37,8 +42,6 @@ The data endpoints in this repo are a best-effort implementation based on older 
 - require direct bearer-auth endpoints instead of the old `apptoken` flow
 
 Because of that, the first command you should run is `probe`, not `sync`.
-
-Weight import is also reverse-engineered. In this repo it uses a private endpoint under `/users/{user_id}/members/-1/weightRecords`, not the official public Huami Web API.
 
 ## Environment variables
 
@@ -53,36 +56,26 @@ Required:
 - `AMAZFIT_APP_TOKEN` — app-level credential for data endpoints
 - `AMAZFIT_USER_ID` — your Zepp account user ID
 - `AMAZFIT_ACCESS_TOKEN` — only needed for first-time Zepp login exchange (not needed once app_token is cached)
-- `AMAZFIT_REFRESH_TOKEN` — optional, no known working refresh endpoint exists
 
 Optional but useful:
 
-- `AMAZFIT_APP_TOKEN`
-- `AMAZFIT_USER_ID`
-- `AMAZFIT_COUNTRY_CODE`
+- `AMAZFIT_COUNTRY_CODE` — default `US`
 - `AMAZFIT_ACCOUNT_BASE_URL`
-- `AMAZFIT_API_HOSTS`
-- `AMAZFIT_TOKEN_REFRESH_URL`
-- `AMAZFIT_AUTH_STATE_PATH`
-- `AMAZFIT_BEARER_API_BASE_URL`
-- `AMAZFIT_BEARER_PROBE_ENDPOINTS`
-- `AMAZFIT_ZEPP_LOGIN_URL`
-- `AMAZFIT_EXTRA_APP_ENDPOINTS`
-- `AMAZFIT_DATA_DIR`
-- `OBSIDIAN_EXPORT_DIR`
-- `AMAZFIT_FROM_DATE`
-- `AMAZFIT_TO_DATE`
+- `AMAZFIT_API_HOSTS` — comma-separated list of API hosts to probe
+- `AMAZFIT_TOKEN_REFRESH_URL` — optional, no known working refresh endpoint exists
+- `AMAZFIT_AUTH_STATE_PATH` — path to local auth state file (default `data/auth_state.json`)
+- `AMAZFIT_BEARER_API_BASE_URL` — for direct bearer-auth probing
+- `AMAZFIT_BEARER_PROBE_ENDPOINTS` — comma-separated bearer endpoints to probe
+- `AMAZFIT_ZEPP_LOGIN_URL` — Zepp login exchange URL
+- `AMAZFIT_EXTRA_APP_ENDPOINTS` — additional apptoken-style endpoints
+- `AMAZFIT_DATA_DIR` — runtime JSON storage directory (default `data`)
+- `OBSIDIAN_EXPORT_DIR` — Obsidian vault path for exported markdown
+- `AMAZFIT_FROM_DATE` — default start date for sync (default `1970-01-01`)
+- `AMAZFIT_TO_DATE` — default end date for sync (defaults to today)
 
-If both `AMAZFIT_ACCESS_TOKEN` and `AMAZFIT_APP_TOKEN` are present, the tool now prefers the cached app credentials first. It only falls back to refresh or Zepp login exchange when the cached app token is missing or when a data endpoint responds with `401`.
-
-When `AMAZFIT_DEVICE_ID` is not provided, the tool generates a stable device identifier once and stores it in the local auth state file. It no longer sends a different random device identifier on every run.
+When `AMAZFIT_DEVICE_ID` is not provided, the tool generates a stable device identifier once and stores it in the local auth state file.
 
 `OBSIDIAN_EXPORT_DIR` can be either a relative path like `exports/obsidian` or an absolute path like `D:/Obsidian-Dima/activity-reports`.
-
-If the default reverse-engineered endpoint catalog is wrong for your account/device, add your own paths:
-
-- `AMAZFIT_EXTRA_APP_ENDPOINTS` for old `apptoken`-style requests
-- `AMAZFIT_BEARER_PROBE_ENDPOINTS` together with `AMAZFIT_BEARER_API_BASE_URL` for direct bearer-auth probing
 
 ## Install
 
@@ -90,8 +83,6 @@ Requires:
 
 - Python 3.12+
 - `uv`
-
-Install the project environment with:
 
 ```bash
 uv sync
@@ -119,7 +110,7 @@ Fetch data and write raw plus normalized JSON:
 uv run main.py sync
 ```
 
-Without explicit dates, `sync` reuses the latest day already present in normalized data as the start date and fetches through today inclusive. If no normalized bundles exist yet, it falls back to `AMAZFIT_FROM_DATE` / `AMAZFIT_TO_DATE` or the built-in defaults.
+Without explicit dates, `sync` starts from the latest day already present in normalized data and fetches through today inclusive. If no normalized bundles exist yet, it falls back to `AMAZFIT_FROM_DATE` / `AMAZFIT_TO_DATE` or built-in defaults.
 
 Fetch a specific date range:
 
@@ -127,7 +118,7 @@ Fetch a specific date range:
 uv run main.py --from 2026-03-01 --to 2026-03-15 sync
 ```
 
-Fetch only raw payloads:
+Fetch only raw payloads (skip normalization):
 
 ```bash
 uv run main.py dump-raw
@@ -139,7 +130,7 @@ Export merged normalized bundles to Obsidian Markdown:
 uv run main.py export-obsidian
 ```
 
-Without explicit dates, `export-obsidian` always rewrites yesterday's report and also backfills any missing reports from the previous 14 days.
+Without explicit dates, `export-obsidian` always rewrites yesterday's report and backfills any missing reports from the previous 14 days.
 
 Export from a specific normalized bundle file:
 
@@ -147,7 +138,7 @@ Export from a specific normalized bundle file:
 uv run main.py export-obsidian --bundle data/normalized/2026/2026-03.json
 ```
 
-Export a specific normalized date range:
+Export a specific date range (overwrites all files in range):
 
 ```bash
 uv run main.py --from 2026-03-10 --to 2026-03-12 export-obsidian
@@ -161,8 +152,10 @@ Runtime artifacts are ignored by git and stored locally:
 data/
   raw/
     band_summary/
+    band_detail/
     weight_records/
-    heart_rate/
+    run_history/
+    run_detail/
     ...
   normalized/
     2026/
@@ -172,6 +165,7 @@ data/
   reports/
     latest_validation.json
     validation_<timestamp>.json
+  auth_state.json
 
 exports/
   obsidian/
@@ -181,7 +175,7 @@ exports/
 
 ## Normalized JSON shape
 
-The normalized bundle is day-centric and intentionally stable even if raw payloads change:
+The normalized bundle is day-centric:
 
 ```json
 {
@@ -191,27 +185,69 @@ The normalized bundle is day-centric and intentionally stable even if raw payloa
     "to": "2026-03-15"
   },
   "resources": [
-    "band_summary"
+    "band_detail",
+    "band_summary",
+    "run_detail",
+    "run_history",
+    "weight_records"
   ],
   "days": [
     {
       "date": "2026-03-01",
       "daily_summary": {
-        "steps_total": 1119,
-        "distance_meters": 757
+        "timezone_offset_minutes": 180,
+        "goal_steps": 8000,
+        "steps_total": 8543,
+        "distance_meters": 6200,
+        "calories_kcal": 312,
+        "walk_minutes": 74,
+        "run_distance_meters": 0,
+        "run_calories_kcal": 0
       },
       "sleep": {
-        "deep_sleep_minutes": 194,
-        "light_sleep_minutes": 250
+        "sleep_start_epoch": 1740873600,
+        "sleep_end_epoch": 1740909600,
+        "deep_sleep_minutes": 120,
+        "light_sleep_minutes": 280,
+        "resting_heart_rate": 58,
+        "stages": []
+      },
+      "activity": {
+        "goal_completion_pct": 106.8,
+        "activity_bout_count": 12,
+        "active_stage_minutes": 95,
+        "longest_activity_bout_minutes": 22,
+        "peak_steps_per_minute": 92.5,
+        "peak_activity_hour": "14:00"
+      },
+      "recovery": {
+        "sleep_minutes": 400,
+        "time_in_bed_minutes": 600,
+        "resting_heart_rate": 58
+      },
+      "trends": {
+        "window_days_14d": 14,
+        "steps_rolling_avg_14d": 7200.5,
+        "sleep_minutes_rolling_avg_14d": 380.2,
+        "resting_hr_rolling_avg_14d": 59.1,
+        "weight_rolling_avg_14d": 91.5,
+        "goal_hit_rate_14d": 64.3,
+        "resting_hr_delta_14d": -1.1,
+        "weight_delta_14d": -0.3
       },
       "heart_rate": [],
       "workouts": [],
       "body_metrics": [],
       "body": {
+        "measured_at": "2026-03-01T08:30:00+00:00",
         "weight_kg": 91.8,
-        "bmi": 27.1
+        "bmi": 27.1,
+        "body_fat_pct": 22.5
       },
-      "extras": {},
+      "extras": {
+        "step_stages": [],
+        "step_stage_summary": []
+      },
       "source_payload_ref": [
         "data/raw/band_summary/..."
       ]
@@ -220,60 +256,55 @@ The normalized bundle is day-centric and intentionally stable even if raw payloa
 }
 ```
 
-## Obsidian export behavior
+On days without a weight measurement, the `body` field inherits the last measured values from a previous day.
+
+## Obsidian export format
 
 Each exported day is rendered to one markdown file named `YYYY-MM-DD-physical.md`.
 
-By default, the command always rewrites yesterday and creates any missing files from the previous 14 days. When `--from` / `--to` are provided, only days inside that inclusive range are rendered and the selected files are rewritten.
+By default, the command always rewrites yesterday and creates any missing files from the previous 14 days. When `--from` / `--to` are provided, only days inside that inclusive range are rendered and all selected files are rewritten.
 
-Each exported file contains:
+Each file contains YAML frontmatter and the following sections:
 
-- frontmatter with date and core metrics
-- weight and body summary when available
-- summary section
-- sleep section
-- optional JSON blocks for workouts, heart rate, body metrics, and extras
-- source payload references for traceability
+- **Trends (14d)** — 14-day rolling baseline vs today with deltas for steps, sleep, resting HR, and weight
+- **Steps** — total steps, distance, walk minutes, peak steps per minute
+- **Steps By Hour** — hourly step breakdown (from device step stage summary)
+- **Body** — weight, BMI, body fat percentage (inherited from last measurement if not measured that day)
+- **Activity** — calories, detected activity sessions, active minutes, longest bout, peak activity hour
+- **Sleep** — sleep start/end, time in bed, total/deep/light sleep minutes, resting heart rate
 
-This is intentionally simple. The raw/normalized JSON is the source of truth. Markdown is a presentation/export layer.
+The raw/normalized JSON is the source of truth. Markdown is a presentation/export layer.
 
 ## Practical workflow
 
-1. Get your `AMAZFIT_ACCESS_TOKEN` and `AMAZFIT_REFRESH_TOKEN` using https://github.com/argrento/huami-token.
-2. Fill `.env`.
+1. Get your `AMAZFIT_ACCESS_TOKEN` using https://github.com/argrento/huami-token or run `python extract_tokens_web.py` for browser-based extraction (recommended).
+2. Fill `.env` with `AMAZFIT_APP_TOKEN` and `AMAZFIT_USER_ID`.
 3. Run `uv sync`.
 4. Run `uv run main.py probe`.
 5. Inspect `data/reports/latest_validation.json`.
 6. If at least one endpoint works, run `uv run main.py sync`.
 7. Inspect the monthly files in `data/normalized/`.
 8. Run `uv run main.py export-obsidian`.
-9. Point Obsidian to `exports/obsidian` or copy the generated notes into your vault structure.
+9. Point Obsidian to your export directory or copy the generated notes into your vault.
 
 ## Security notes
 
-- `.env` is ignored by git.
-- `data/auth_state.json` is also local-only and may contain live tokens, so treat it as sensitive.
-- The tool does not print token values.
-- Raw API payloads are stored locally, so treat `data/` as sensitive.
+- Raw API payloads are stored locally — treat `data/` as sensitive.
 - Token refresh is only attempted if `AMAZFIT_TOKEN_REFRESH_URL` is explicitly configured.
-- Cached app credentials are preferred over password-style or access-token login flows to reduce unnecessary account re-logins and device/session churn.
-- Probe results are written even when endpoint validation fails, so you can inspect exact HTTP status codes.
+- Cached app credentials are preferred over password-style or access-token login flows.
+- Probe results are written even when endpoints fail, so you can inspect exact HTTP status codes.
 
-## What was verified in this repo
+## Verified endpoints in this workspace
 
-- Python modules compile successfully.
-- CLI starts successfully and exposes the intended commands.
-- Live probe was executed in this workspace and produced a structured validation report in `data/reports/latest_validation.json`.
-- The old Huami login exchange was not correct for tokens obtained from `huami-token`.
-- After switching to the newer Zepp login exchange, live sync succeeded in this workspace.
-- Confirmed working endpoints in this workspace:
-  - `https://api-mifit.zepp.com/v1/data/band_data.json`
-  - `https://api-mifit.zepp.com/v1/sport/run/history.json`
-  - `https://api-mifit.zepp.com/v1/sport/run/detail.json`
-  - `https://api-mifit.zepp.com/users/<user_id>/members/-1/weightRecords`
-- Confirmed non-working guesses in this workspace:
-  - `sleep_data.json` -> `404`
-  - `activity_data.json` -> `404`
-  - `workout_data.json` -> `404`
-  - `body_data.json` -> `404`
-  - `heart_rate.json` -> `400`
+Working:
+- `https://api-mifit.zepp.com/v1/data/band_data.json` (summary and detail)
+- `https://api-mifit.zepp.com/v1/sport/run/history.json`
+- `https://api-mifit.zepp.com/v1/sport/run/detail.json`
+- `https://api-mifit.zepp.com/users/<user_id>/members/-1/weightRecords`
+
+Not working (404/400):
+- `sleep_data.json`
+- `activity_data.json`
+- `workout_data.json`
+- `body_data.json`
+- `heart_rate.json`
